@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"time"
 )
 
 // Test that errors.Join exposes all leaves to errors.Is/As and our helpers.
@@ -134,6 +135,14 @@ func TestJoin_CodePredicates(t *testing.T) {
 	// Retryable heuristic should return true if any joined leaf is transient.
 	if !IsRetryable(err) {
 		t.Fatalf("IsRetryable(join(unavailable,429)) should be true")
+	}
+
+	reordered := errors.Join(Invalid("field", "bad"), Timeout(3*time.Second))
+	if !HasCode(reordered, CodeTimeout) {
+		t.Fatalf("HasCode should find CodeTimeout even when not first in join")
+	}
+	if !IsRetryable(reordered) {
+		t.Fatalf("IsRetryable should consider all codes in a join, regardless of order")
 	}
 }
 

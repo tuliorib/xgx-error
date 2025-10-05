@@ -1,17 +1,18 @@
 // predicates.go — minimal, stdlib-aligned predicates for xgx-error core.
 //
 // Scope:
-//   • Zero-policy helpers that answer common classification questions.
-//   • Interop-first: use errors.Is / errors.As so traversal works with both
-//     single Unwrap() error and multi Unwrap() []error (e.g., errors.Join).
+//   - Zero-policy helpers for common classification questions.
+//   - Interop-first: rely on errors.Is / errors.As so traversal works with both
+//     Unwrap() error and Unwrap() []error (e.g., errors.Join / multi-%w).
 //
 // Notes:
-//   • context interrupts: detect via errors.Is against context.Canceled /
-//     context.DeadlineExceeded (the canonical values in the stdlib). :contentReference[oaicite:0]{index=0}
-//   • Joined errors: errors.Is/As traverse Unwrap() []error as of Go 1.20+. :contentReference[oaicite:1]{index=1}
+//   - Interrupts are detected via errors.Is against context.Canceled /
+//     context.DeadlineExceeded (canonical stdlib sentinels).
+//   - HasCode / IsRetryable scan the entire unwrap graph (all branches).
+//   - CodeOf returns the first discovered Code via errors.As (first match).
 //
 // Out of scope (by design):
-//   • HTTP/status mapping, retry backoff policy, logging.
+//   - HTTP/status mapping, retry backoff policy, logging.
 package xgxerror
 
 import (
@@ -19,84 +20,97 @@ import (
 	"errors"
 )
 
+// internal convenience interface for anything that exposes a Code.
+type coder interface{ CodeVal() Code }
+
 // IsDefect reports whether err is (or wraps) a programming defect.
-// It matches either the internal defect type or any xgxerror.Error
-// that reports CodeDefect.
+//
+// It matches either the concrete internal defect type or any value that
+// implements CodeVal()==CodeDefect. Traversal follows stdlib rules and
+// includes joined graphs.
 func IsDefect(err error) bool {
 	if err == nil {
 		return false
 	}
-	// Match concrete defect
+	// Match concrete defect node.
 	var d *defectErr
 	if errors.As(err, &d) {
 		return true
 	}
-	// Match any error that exposes CodeVal()==CodeDefect
-	var cv interface{ CodeVal() Code }
-	if errors.As(err, &cv) {
-		return cv.CodeVal() == CodeDefect
-	}
-	return false
+	// Or anything reporting CodeDefect.
+	var c coder
+	return errors.As(err, &c) && c.CodeVal() == CodeDefect
 }
 
-// IsInterrupt reports whether err denotes cooperative cancellation or a deadline
-// expiry. It returns true if the chain contains xgxerror interrupt OR the
-// canonical stdlib context errors.
+// IsInterrupt reports whether err denotes cooperative cancellation or a deadline.
+//
+// Returns true if any branch unwraps to context.Canceled or
+// context.DeadlineExceeded, or if a node reports CodeInterrupt.
 func IsInterrupt(err error) bool {
 	if err == nil {
 		return false
 	}
-	// Canonical stdlib signals. errors.Is handles Unwrap chains (incl. joins).
-	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) { // stdlib sentinel errors. :contentReference[oaicite:2]{index=2}
+	// Canonical stdlib sentinels.
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 		return true
 	}
-	// Match our internal interrupt type or any CodeInterrupt.
+	// Our concrete interrupt node.
 	var ie *interruptErr
 	if errors.As(err, &ie) {
 		return true
 	}
-	var cv interface{ CodeVal() Code }
-	if errors.As(err, &cv) {
-		return cv.CodeVal() == CodeInterrupt
-	}
-	return false
+	// Or anything reporting CodeInterrupt.
+	var c coder
+	return errors.As(err, &c) && c.CodeVal() == CodeInterrupt
 }
 
-// HasCode reports whether any error in the unwrap graph carries the given code.
+// HasCode reports whether any node in the unwrap graph carries the given code.
+// Scans ALL branches (including errors.Join).
 func HasCode(err error, code Code) bool {
 	if err == nil {
 		return false
 	}
-	var cv interface{ CodeVal() Code }
-	return errors.As(err, &cv) && cv.CodeVal() == code // Is/As traverse both single and multi unwraps. :contentReference[oaicite:3]{index=3}
+	found := false
+	Walk(err, func(e error) bool {
+		if c, ok := e.(coder); ok && c.CodeVal() == code {
+			found = true
+			return false // early exit
+		}
+		return true
+	})
+	return found
 }
 
-// IsRetryable provides a tiny, policy-free heuristic based on codes that
-// commonly represent transient conditions. This does NOT implement backoff
-// or budgets; higher layers should own retry policy.
-//
-// Defaults: unavailable, timeout, too_many_requests → retryable.
-// Everything else → non-retryable.
+// IsRetryable is a tiny, policy-free heuristic based on commonly transient codes.
+// Returns true if ANY branch reports one of: unavailable, timeout, too_many_requests.
+// Backoff/budgets belong in higher layers.
 func IsRetryable(err error) bool {
 	if err == nil {
 		return false
 	}
-	switch CodeOf(err) {
-	case CodeUnavailable, CodeTimeout, CodeTooManyRequests:
+	retryable := false
+	Walk(err, func(e error) bool {
+		if c, ok := e.(coder); ok {
+			switch c.CodeVal() {
+			case CodeUnavailable, CodeTimeout, CodeTooManyRequests:
+				retryable = true
+				return false // early exit
+			}
+		}
 		return true
-	default:
-		return false
-	}
+	})
+	return retryable
 }
 
-// CodeOf returns the first discovered Code along err's chain, or "" if none.
+// CodeOf returns the first discovered Code along err's chain (first match)
+// or "" if none. Uses errors.As to respect stdlib traversal order.
 func CodeOf(err error) Code {
 	if err == nil {
 		return ""
 	}
-	var cv interface{ CodeVal() Code }
-	if errors.As(err, &cv) {
-		return cv.CodeVal()
+	var c coder
+	if errors.As(err, &c) {
+		return c.CodeVal()
 	}
 	return ""
 }
