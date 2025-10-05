@@ -1,3 +1,8 @@
+// Copyright (c) 2025.
+// SPDX-License-Identifier: MIT
+//
+// See the LICENSE file in the project root for license information.
+
 // Package xgxerror defines the minimal, composable error model used across
 // xgx projects. It focuses on precise classification and context, while
 // remaining perfectly interoperable with the Go standard library.
@@ -13,7 +18,21 @@
 //   - Implement Unwrap() error (and optionally Unwrap() []error on join types)
 //     so stdlib traversal (errors.Is/As) observes full causal chains.
 //
-// See: errors.Is / errors.As / errors.Join contracts in the Go standard library.
+// Notes on semantics (normative):
+//   - Message chaining (Ctx): if the current message is empty, it becomes msg;
+//     if msg is empty, message is unchanged (but kv fields are still added);
+//     otherwise message = old + ": " + msg.
+//   - Context fields (Ctx/CtxBound/With): appended in call order as key/value
+//     pairs. Non-string "key" causes the entire pair (key and its following
+//     value, if any) to be dropped to avoid misalignment. A trailing key with
+//     no value is recorded as (key, nil).
+//   - Bounded context (CtxBound): enforces a maximum number of total fields;
+//     when exceeded, newest fields are kept and the oldest are dropped until
+//     total <= maxFields. New fields from kv are added first, then truncation
+//     is applied if needed.
+//   - Stack capture: WithStack() attempts to skip internal helpers so captured
+//     frames begin at or near the user call site. Depending on inlining and
+//     tooling, 1–2 boundary frames may still appear.
 package xgxerror
 
 // Code classifies errors into machine-readable categories.
@@ -38,8 +57,8 @@ type Code string
 // Note: Core intentionally avoids logging/HTTP/JSON methods. Adapters live in
 // separate modules (e.g., xgx-error-slog, xgx-error-http, xgx-error-json).
 type Error interface {
-	// error provides the canonical message string. Keep it concise; rich
-	// export (JSON, structured logs) belongs to adapters outside the core.
+	// error provides the canonical concise message string. Keep it concise;
+	// rich export (JSON, structured logs) belongs to adapters outside the core.
 	error
 
 	// Ctx attaches a short contextual message and optional key-value fields.
@@ -48,6 +67,15 @@ type Error interface {
 	// Example:
 	//   err = err.Ctx("query failed", "table", "users", "elapsed_ms", 12.7)
 	Ctx(msg string, kv ...any) Error
+
+	// CtxBound behaves like Ctx but enforces a maximum number of total context
+	// fields. When the total would exceed maxFields, it keeps the newest fields
+	// and drops the oldest until total <= maxFields. If maxFields <= 0, no
+	// bound is applied. Returns a NEW Error.
+	//
+	// Example:
+	//   err = err.CtxBound("retry", 8, "attempt", n, "backoff_ms", d.Milliseconds())
+	CtxBound(msg string, maxFields int, kv ...any) Error
 
 	// With adds a single key-value field. Returns a NEW Error.
 	//
@@ -59,32 +87,26 @@ type Error interface {
 	//
 	// Example:
 	//   err = err.Code(Code("not_found"))
-	Code(Code) Error
+	Code(c Code) Error
 
-	// WithStack attaches a stack trace to this error. Returns a NEW Error.
-	// Implementations SHOULD capture stacks lazily and only when requested.
-	WithStack() Error
-
-	// WithStackSkip is like WithStack but allows skipping call frames
-	// (e.g., helper wrappers). Returns a NEW Error.
-	WithStackSkip(skip int) Error
-
-	// Code returns the classification code. If no code is set, implementations
-	// MAY return an empty Code ("") to indicate "unspecified". The getter is
-	// named CodeVal to avoid colliding with the fluent Code(Code) Error setter.
+	// CodeVal returns the current classification code, or "" if unset.
 	CodeVal() Code
 
-	// Context returns a shallow COPY of the error's context as a map.
-	// The returned map MUST be safe to mutate by callers without affecting
-	// the stored context (copy-on-read).
+	// WithStack returns a new Error that includes a captured stack trace
+	// starting at the call site. Implementations SHOULD bound the number of
+	// captured frames for performance.
+	WithStack() Error
+
+	// WithStackSkip behaves like WithStack but skips an additional number of
+	// stack frames above the implementation’s default internal skips. This is
+	// useful to hide adapter/helper frames in wrappers.
+	WithStackSkip(skip int) Error
+
+	// Context returns a new map containing the structured context fields, or
+	// nil if there are none. The map is a copy; mutating it does not affect
+	// the Error (copy-on-read).
 	Context() map[string]any
 
-	// Unwrap returns the causal parent error (if any) to enable stdlib
-	// traversal via errors.Is/As. Implementations that do not wrap anything
-	// SHOULD return nil.
-	//
-	// Multi-error containers defined elsewhere MAY also implement:
-	//   Unwrap() []error
-	// which stdlib errors.Is/As will traverse as a set.
+	// Unwrap returns the immediate cause (if any) to support errors.Is/As.
 	Unwrap() error
 }

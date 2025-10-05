@@ -23,7 +23,6 @@ package xgxerror
 import (
 	"context"
 	"fmt"
-	"strings"
 	"time"
 )
 
@@ -54,10 +53,8 @@ func (e *failureErr) Error() string {
 	return e.msg
 }
 
-func (e *failureErr) Unwrap() error { return e.cause }
-
-func (e *failureErr) CodeVal() Code { return e.code }
-
+func (e *failureErr) Unwrap() error   { return e.cause }
+func (e *failureErr) CodeVal() Code   { return e.code }
 func (e *failureErr) Context() map[string]any { return ctxToMap(e.ctx) }
 
 // Ctx appends a short message segment (using ": " as the separator) and
@@ -76,47 +73,26 @@ func (e *failureErr) Ctx(msg string, kv ...any) Error {
 	return n
 }
 
-// CtxLast replaces the current message (instead of concatenating) while still
-// appending any provided context fields, returning a NEW error value.
-func (e *failureErr) CtxLast(msg string, kv ...any) Error {
+// CtxBound behaves like Ctx but enforces a maximum number of TOTAL context
+// fields. When the total would exceed maxFields, it keeps the newest fields and
+// drops the oldest until total <= maxFields. If maxFields <= 0, no bound is applied.
+func (e *failureErr) CtxBound(msg string, maxFields int, kv ...any) Error {
 	n := e.clone()
-	if msg != "" {
+	switch {
+	case n.msg == "":
 		n.msg = msg
+	case msg != "":
+		n.msg = n.msg + ": " + msg
 	}
 	if len(kv) > 0 {
 		n.ctx = ctxCloneAppend(n.ctx, ctxFromKV(kv...)...)
 	}
-	return n
-}
-
-// CtxBound appends a message segment while bounding the history to at most
-// 'limit' segments (keeping the most recent). When limit <= 0 it behaves like
-// CtxLast. Context fields are appended immutably like Ctx.
-func (e *failureErr) CtxBound(msg string, limit int, kv ...any) Error {
-	if limit <= 0 {
-		return e.CtxLast(msg, kv...)
-	}
-
-	n := e.clone()
-
-	var segments []string
-	if n.msg != "" {
-		segments = strings.Split(n.msg, ": ")
-	}
-	if msg != "" {
-		segments = append(segments, msg)
-	}
-	if len(segments) > limit {
-		segments = segments[len(segments)-limit:]
-	}
-	if len(segments) == 0 {
-		n.msg = ""
-	} else {
-		n.msg = strings.Join(segments, ": ")
-	}
-
-	if len(kv) > 0 {
-		n.ctx = ctxCloneAppend(n.ctx, ctxFromKV(kv...)...)
+	if maxFields > 0 && len(n.ctx) > maxFields {
+		keep := n.ctx[len(n.ctx)-maxFields:]
+		// Defensive copy to ensure isolation even if the original had spare capacity.
+		copied := make(fields, len(keep))
+		copy(copied, keep)
+		n.ctx = copied
 	}
 	return n
 }
@@ -176,11 +152,9 @@ func (e *defectErr) Error() string {
 	return "defect"
 }
 
-func (e *defectErr) Unwrap() error { return e.cause }
-
-func (e *defectErr) CodeVal() Code { return CodeDefect }
-
-func (e *defectErr) Context() map[string]any { return ctxToMap(e.ctx) }
+func (e *defectErr) Unwrap() error             { return e.cause }
+func (e *defectErr) CodeVal() Code             { return CodeDefect }
+func (e *defectErr) Context() map[string]any   { return ctxToMap(e.ctx) }
 
 func (e *defectErr) Ctx(msg string, kv ...any) Error {
 	n := e.clone()
@@ -196,6 +170,29 @@ func (e *defectErr) Ctx(msg string, kv ...any) Error {
 	return n
 }
 
+// CtxBound behaves like Ctx but enforces a maximum number of TOTAL context
+// fields. When the total would exceed maxFields, it keeps the newest fields and
+// drops the oldest until total <= maxFields. If maxFields <= 0, no bound is applied.
+func (e *defectErr) CtxBound(msg string, maxFields int, kv ...any) Error {
+	n := e.clone()
+	switch {
+	case n.msg == "":
+		n.msg = msg
+	case msg != "":
+		n.msg = n.msg + ": " + msg
+	}
+	if len(kv) > 0 {
+		n.ctx = ctxCloneAppend(n.ctx, ctxFromKV(kv...)...)
+	}
+	if maxFields > 0 && len(n.ctx) > maxFields {
+		keep := n.ctx[len(n.ctx)-maxFields:]
+		copied := make(fields, len(keep))
+		copy(copied, keep)
+		n.ctx = copied
+	}
+	return n
+}
+
 func (e *defectErr) With(key string, val any) Error {
 	n := e.clone()
 	n.ctx = ctxCloneAppend(n.ctx, Field{Key: key, Val: val})
@@ -205,24 +202,18 @@ func (e *defectErr) With(key string, val any) Error {
 // Code ignores attempts to reclassify a defect. Defects are permanently
 // CodeDefect to preserve invariants, so this returns a clone without applying
 // the supplied code.
-func (e *defectErr) Code(c Code) Error {
-	return e.clone()
-}
+func (e *defectErr) Code(c Code) Error { return e.clone() }
 
-func (e *defectErr) WithStack() Error {
-	// Stack captured at creation; return as-is to keep semantics simple.
-	return e.clone()
-}
-
-func (e *defectErr) WithStackSkip(skip int) Error {
-	// Preserve original capture; do not recapture for defects.
-	return e.clone()
-}
+func (e *defectErr) WithStack() Error        { return e.clone() } // captured at creation
+func (e *defectErr) WithStackSkip(int) Error { return e.clone() } // do not recapture
 
 func (e *defectErr) clone() *defectErr {
 	n := *e
 	if len(e.ctx) > 0 {
-		n.ctx = ctxCloneAppend(emptyFields, e.ctx...)
+		n.ctx = make(fields, len(e.ctx))
+		copy(n.ctx, e.ctx)
+	} else {
+		n.ctx = emptyFields
 	}
 	return &n
 }
@@ -242,10 +233,8 @@ func (e *interruptErr) Error() string {
 	return "interrupt"
 }
 
-func (e *interruptErr) Unwrap() error { return e.cause }
-
-func (e *interruptErr) CodeVal() Code { return CodeInterrupt }
-
+func (e *interruptErr) Unwrap() error           { return e.cause }
+func (e *interruptErr) CodeVal() Code           { return CodeInterrupt }
 func (e *interruptErr) Context() map[string]any { return ctxToMap(e.ctx) }
 
 func (e *interruptErr) Ctx(msg string, kv ...any) Error {
@@ -262,24 +251,46 @@ func (e *interruptErr) Ctx(msg string, kv ...any) Error {
 	return n
 }
 
+// CtxBound behaves like Ctx but enforces a maximum number of TOTAL context
+// fields. When the total would exceed maxFields, it keeps the newest fields and
+// drops the oldest until total <= maxFields. If maxFields <= 0, no bound is applied.
+func (e *interruptErr) CtxBound(msg string, maxFields int, kv ...any) Error {
+	n := e.clone()
+	switch {
+	case n.msg == "":
+		n.msg = msg
+	case msg != "":
+		n.msg = n.msg + ": " + msg
+	}
+	if len(kv) > 0 {
+		n.ctx = ctxCloneAppend(n.ctx, ctxFromKV(kv...)...)
+	}
+	if maxFields > 0 && len(n.ctx) > maxFields {
+		keep := n.ctx[len(n.ctx)-maxFields:]
+		copied := make(fields, len(keep))
+		copy(copied, keep)
+		n.ctx = copied
+	}
+	return n
+}
+
 func (e *interruptErr) With(key string, val any) Error {
 	n := e.clone()
 	n.ctx = ctxCloneAppend(n.ctx, Field{Key: key, Val: val})
 	return n
 }
 
-func (e *interruptErr) Code(c Code) Error {
-	// Interrupt is always CodeInterrupt.
-	return e.clone()
-}
-
-func (e *interruptErr) WithStack() Error        { return e.clone() }
+func (e *interruptErr) Code(c Code) Error      { return e.clone() } // fixed class
+func (e *interruptErr) WithStack() Error       { return e.clone() } // no stacks for interrupts
 func (e *interruptErr) WithStackSkip(int) Error { return e.clone() }
 
 func (e *interruptErr) clone() *interruptErr {
 	n := *e
 	if len(e.ctx) > 0 {
-		n.ctx = ctxCloneAppend(emptyFields, e.ctx...)
+		n.ctx = make(fields, len(e.ctx))
+		copy(n.ctx, e.ctx)
+	} else {
+		n.ctx = emptyFields
 	}
 	return &n
 }
@@ -347,22 +358,17 @@ func TooManyRequests(resource string) Error {
 // Semantic constructors — Infrastructure (5xx-aligned intent, no HTTP in core)
 // -----------------------------------------------------------------------------
 
-// Internal wraps an underlying error as an internal failure.
-// If err is nil, returns a generic internal error.
+// Internal wraps an underlying error as an internal failure and captures a stack.
+// If err is nil, returns a generic internal error with a stack capture so the
+// boundary is still debuggable.
 func Internal(err error) Error {
-	if err == nil {
-		return &failureErr{
-			msg:  "internal error",
-			code: CodeInternal,
-			ctx:  emptyFields,
-		}
-	}
-	return (&failureErr{
+	fe := &failureErr{
 		msg:   "internal error",
 		code:  CodeInternal,
 		ctx:   emptyFields,
 		cause: err,
-	}).WithStack() // capture once at boundary; callers can drop via adapters if desired
+	}
+	return fe.WithStack() // capture once at the boundary
 }
 
 // Timeout indicates operation took longer than expected. Records duration.
@@ -448,3 +454,12 @@ func Ctx(err error, msg string, kv ...any) Error {
 func New(msg string, kv ...any) Error {
 	return &failureErr{msg: msg, code: CodeInternal, ctx: ctxFromKV(kv...)}
 }
+
+// -----------------------------------------------------------------------------
+// Interface conformance guards (keep in the file that defines the types)
+// -----------------------------------------------------------------------------
+var (
+	_ Error = (*failureErr)(nil)
+	_ Error = (*defectErr)(nil)
+	_ Error = (*interruptErr)(nil)
+)

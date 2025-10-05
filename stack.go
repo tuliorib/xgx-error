@@ -25,7 +25,7 @@ type Frame struct {
 	Line     int     // line number
 	Function string  // fully-qualified function name (pkg.Func or method)
 	// Note: we intentionally omit "Inlined" because runtime.Frame already
-	// merges inlined frames via CallersFrames; callers rarely need the bit.
+	// expands inlined frames via CallersFrames; callers rarely need the bit.
 }
 
 // Stack is a slice of Frames from most recent call outward.
@@ -40,12 +40,14 @@ const (
 // captureStackDefault captures a stack skipping 'skip' frames, with a
 // conservative default depth bound.
 //
-// skip rules (per runtime.Callers):
+// Skip model for a typical call chain:
 //
-//	0 -> this function (captureStackDefault)
-//	1 -> its caller (captureStack)
-//	2 -> caller's caller (e.g., WithStack)
-//	...
+//   WithStack → WithStackSkip → captureStackDefault → captureStack → runtime.Callers
+//
+// The skip parameter here is *additional* to the internal helpers. Internally
+// we ensure user-visible stacks begin at (or very near) the user call site by
+// adding +3 in captureStack (to skip runtime.Callers, captureStack, and
+// captureStackDefault). Any extra 'skip' provided by callers is applied on top.
 func captureStackDefault(skip int) Stack {
 	return captureStack(skip, defaultMaxDepth)
 }
@@ -61,18 +63,22 @@ func captureStack(skip, maxDepth int) Stack {
 	if maxDepth <= 0 {
 		maxDepth = defaultMaxDepth
 	}
-	// +2 accounts for runtime.Callers itself plus captureStack; skip is relative
-	// to the caller of captureStackDefault/captureStack.
+
+	// Skip accounting:
+	//   • +1 for runtime.Callers itself
+	//   • +1 for captureStack
+	//   • +1 for captureStackDefault
+	// Therefore we add +3 to place the first recorded frame at (or very near)
+	// the user-visible call site (e.g., the caller of WithStack/WithStackSkip).
 	pc := make([]uintptr, maxDepth)
-	n := runtime.Callers(skip+2, pc)
+	n := runtime.Callers(skip+3, pc)
 	if n == 0 {
 		return nil
 	}
 	pc = pc[:n]
 
 	frames := runtime.CallersFrames(pc)
-	var out Stack
-	out = make(Stack, 0, n) // prealloc for readability; indexing variant offers negligible gain
+	out := make(Stack, 0, n)
 
 	for {
 		fr, more := frames.Next()

@@ -3,7 +3,7 @@
 // Intent:
 //   - Provide a small set of widely useful, human-readable codes.
 //   - Keep semantics open-ended: no HTTP/status/retry policy in core.
-//   - Allow projects to extend with their own codes without central registry.
+//   - Allow projects to extend with their own codes without a central registry.
 //
 // Notes:
 //   - Codes are strings to preserve stability across logs/JSON and avoid
@@ -16,12 +16,12 @@ package xgxerror
 //
 // Groups (informative, not enforced):
 //
-//	Domain (often analogous to 4xx): bad_request, unauthorized, forbidden,
-//	not_found, conflict, invalid, unprocessable, too_many_requests.
+//   Domain (often analogous to 4xx): bad_request, unauthorized, forbidden,
+//   not_found, conflict, invalid, unprocessable, too_many_requests.
 //
-//	Infrastructure (often analogous to 5xx): internal, timeout, unavailable.
+//   Infrastructure (often analogous to 5xx): internal, timeout, unavailable.
 //
-//	Special: defect (programming bug), interrupt (cancellation/deadline).
+//   Special: defect (programming bug), interrupt (cancellation/deadline).
 const (
 	// Domain-oriented
 	CodeBadRequest      Code = "bad_request"
@@ -52,7 +52,7 @@ func (c Code) IsBuiltin() bool {
 	if c == "" {
 		return false
 	}
-	for _, builtin := range AllBuiltinCodes {
+	for _, builtin := range allBuiltinCodes {
 		if c == builtin {
 			return true
 		}
@@ -60,10 +60,16 @@ func (c Code) IsBuiltin() bool {
 	return false
 }
 
-// AllBuiltinCodes lists the built-in codes for reference (tests, docs).
-// This slice is not meant to be exhaustive for an application; projects may
-// define additional codes as needed.
-var AllBuiltinCodes = []Code{
+// BuiltinCodes returns a copy of the built-in codes in stable order.
+// Callers may freely modify the returned slice without affecting the package.
+func BuiltinCodes() []Code {
+	out := make([]Code, len(allBuiltinCodes))
+	copy(out, allBuiltinCodes)
+	return out
+}
+
+// Unexported canonical list to avoid exposing mutable package state.
+var allBuiltinCodes = []Code{
 	CodeBadRequest,
 	CodeUnauthorized,
 	CodeForbidden,

@@ -21,7 +21,7 @@ Most projects need: (1) a clear taxonomy, (2) rich context without surprises, (3
 ## Install
 
 ```bash
-go get github.com/xgx-io/xgx-error@latest
+go get github.com/tuliorib/xgx-error@latest
 ```
 
 Requires Go **1.25+** (currently in preview; see [release notes][1]).

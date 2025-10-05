@@ -4,10 +4,11 @@
 //   • Internal representation: append-only []Field (deterministic order).
 //   • Builders are non-mutating: return NEW slices (no aliasing).
 //   • Public view for callers: copy-on-read map[string]any.
+//
 // Rationale:
 //   • Go map iteration order is unspecified; slice preserves insertion order.
 //   • Slice append may re-use capacity; we always allocate a fresh slice when
-//     "mutating" to ensure copy-on-write semantics for safety.
+//     “mutating” to ensure copy-on-write semantics for safety.
 //
 // Note: All identifiers here are unexported except Field; other files in the
 // same package use these helpers to implement Error methods.
@@ -49,8 +50,21 @@ func ctxCloneAppend(dst fields, add ...Field) fields {
 }
 
 // ctxFromKV parses a variadic list of key-value arguments into fields.
-// Odd trailing key without value is accepted with a nil value.
-// Non-string keys are ignored.
+//
+// Rules (normative):
+//   • Pairs are read left-to-right as (key, value).
+//   • Keys MUST be strings; a non-string “key” causes the ENTIRE PAIR to be
+//     dropped (the key and its following value, if any). This avoids surprising
+//     misalignment where a value becomes the next pair’s key.
+//   • A trailing key with no value becomes (key, nil).
+//
+// Example (why we drop the whole pair):
+//   // INPUT (bad first key):
+//   ctxFromKV(123, "v1", "k2", "v2")
+//   // OLD behavior (misaligned):
+//   //   → [{Key:"v1", Val:"k2"}, {Key:"v2", Val:nil}]
+//   // NEW behavior (pair dropped, keeps alignment):
+//   //   → [{Key:"k2", Val:"v2"}]
 func ctxFromKV(kv ...any) fields {
 	if len(kv) == 0 {
 		return emptyFields
@@ -59,8 +73,13 @@ func ctxFromKV(kv ...any) fields {
 	for i := 0; i < len(kv); {
 		k, ok := kv[i].(string)
 		if !ok {
-			// Skip non-string key; advance by 1 to resync pairing.
-			i++
+			// Drop the entire pair (key and its following value, if any)
+			// to prevent misalignment of subsequent pairs.
+			if i+1 < len(kv) {
+				i += 2
+			} else {
+				i++
+			}
 			continue
 		}
 		var v any
@@ -92,22 +111,4 @@ func ctxToMap(fs fields) map[string]any {
 		m[f.Key] = f.Val
 	}
 	return m
-}
-
-// ctxMerge returns a NEW fields slice with a followed by b.
-// It always allocates to maintain immutability guarantees.
-func ctxMerge(a, b fields) fields {
-	if len(a) == 0 && len(b) == 0 {
-		return emptyFields
-	}
-	if len(a) == 0 {
-		return ctxCloneAppend(emptyFields, b...)
-	}
-	if len(b) == 0 {
-		return ctxCloneAppend(emptyFields, a...)
-	}
-	out := make(fields, len(a)+len(b))
-	copy(out, a)
-	copy(out[len(a):], b)
-	return out
 }
