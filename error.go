@@ -3,14 +3,14 @@
 // remaining perfectly interoperable with the Go standard library.
 //
 // Design tenets:
-//   • Interop-first: play nicely with errors.Is/As and errors.Join.
-//   • Minimal surface: no logging/HTTP/JSON in core.
-//   • Non-mutating ergonomics: fluent builders return a new value.
-//   • Selective stacks: callers opt in; defects capture by default (impl detail).
+//   - Interop-first: play nicely with errors.Is/As and errors.Join.
+//   - Minimal surface: no logging/HTTP/JSON in core.
+//   - Non-mutating ergonomics: fluent builders return a new value.
+//   - Selective stacks: callers opt in; defects capture by default (impl detail).
 //
 // Implementations SHOULD:
-//   • Keep fluent methods non-mutating (copy-on-write).
-//   • Implement Unwrap() error (and optionally Unwrap() []error on join types)
+//   - Keep fluent methods non-mutating (copy-on-write).
+//   - Implement Unwrap() error (and optionally Unwrap() []error on join types)
 //     so stdlib traversal (errors.Is/As) observes full causal chains.
 //
 // See: errors.Is / errors.As / errors.Join contracts in the Go standard library.
@@ -26,12 +26,13 @@ type Code string
 // Error is the minimal, fluent, interop-friendly contract for xgx errors.
 //
 // All fluent methods MUST be non-mutating: they return a new Error value
-// (copy-on-write) and MUST NOT alter the receiver state. This makes chaining
-// thread-safe by construction and keeps provenance reproducible for logs/tests.
+// (copy-on-write) and MUST NOT alter the receiver state. This guarantees
+// thread-safety for shared error values and keeps provenance reproducible for
+// logs/tests without external synchronization.
 //
 // Unwrap semantics:
-//   • Implementations SHOULD provide Unwrap() error to expose a causal parent.
-//   • Multi-error containers MAY implement Unwrap() []error (in their own file)
+//   - Implementations SHOULD provide Unwrap() error to expose a causal parent.
+//   - Multi-error containers MAY implement Unwrap() []error (in their own file)
 //     to integrate with errors.Is/As over joined error trees.
 //
 // Note: Core intentionally avoids logging/HTTP/JSON methods. Adapters live in
@@ -69,7 +70,8 @@ type Error interface {
 	WithStackSkip(skip int) Error
 
 	// Code returns the classification code. If no code is set, implementations
-	// MAY return an empty Code ("") to indicate "unspecified".
+	// MAY return an empty Code ("") to indicate "unspecified". The getter is
+	// named CodeVal to avoid colliding with the fluent Code(Code) Error setter.
 	CodeVal() Code
 
 	// Context returns a shallow COPY of the error's context as a map.

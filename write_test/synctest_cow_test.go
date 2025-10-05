@@ -7,6 +7,10 @@ import (
 	"time"
 )
 
+// NOTE: These synctest-backed tests rely on the Go 1.25 virtual time harness to
+// provide deterministic scheduling; synctest ships with Go 1.25 and keeps these
+// copy-on-write concurrency checks free of sleeps and flakes.
+
 // TestCOW_ConcurrentFluentMethods_Synctest validates that fluent builders are
 // non-mutating (copy-on-write) even when used from many goroutines.
 // It runs inside a synctest bubble for deterministic scheduling.

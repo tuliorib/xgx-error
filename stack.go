@@ -1,17 +1,17 @@
 // stack.go — selective stack capture for xgx-error core.
 //
 // Design goals:
-//   • Interop & correctness: use runtime.Callers + runtime.CallersFrames for
+//   - Interop & correctness: use runtime.Callers + runtime.CallersFrames for
 //     accurate frame resolution (handles inlining correctly).
-//   • Minimal policy: no global toggles here; callers opt in via WithStack*.
-//   • Pragmatic performance: bounded depth, cheap defaults, no allocations on
+//   - Minimal policy: no global toggles here; callers opt in via WithStack*.
+//   - Pragmatic performance: bounded depth, cheap defaults, no allocations on
 //     success paths (only when capture is requested).
 //
 // References:
-//   • runtime.Callers / CallersFrames docs and example
-//   • Prefer CallersFrames over FuncForPC for inlined frames
-//   • Callers skip semantics (0 = Callers, 1 = its caller)
-//   • Go 1.25 context (no API breaking changes needed here)
+//   - runtime.Callers / CallersFrames docs and example
+//   - Prefer CallersFrames over FuncForPC for inlined frames
+//   - Callers skip semantics (0 = Callers, 1 = its caller)
+//   - Go 1.25 context (no API breaking changes needed here)
 package xgxerror
 
 import (
@@ -41,10 +41,11 @@ const (
 // conservative default depth bound.
 //
 // skip rules (per runtime.Callers):
-//   0 -> this function (captureStackDefault)
-//   1 -> its caller (captureStack)
-//   2 -> caller's caller (e.g., WithStack)
-//   ...
+//
+//	0 -> this function (captureStackDefault)
+//	1 -> its caller (captureStack)
+//	2 -> caller's caller (e.g., WithStack)
+//	...
 func captureStackDefault(skip int) Stack {
 	return captureStack(skip, defaultMaxDepth)
 }
@@ -53,16 +54,17 @@ func captureStackDefault(skip int) Stack {
 // It returns a resolved Stack with file, line, and function names.
 //
 // Notes:
-//   • We allocate a small PC buffer sized by maxDepth and let Callers trim it.
-//   • We always reslice to the number of PCs actually written.
-//   • We resolve frames via CallersFrames to handle inlined calls correctly.
+//   - We allocate a small PC buffer sized by maxDepth and let Callers trim it.
+//   - We always reslice to the number of PCs actually written.
+//   - We resolve frames via CallersFrames to handle inlined calls correctly.
 func captureStack(skip, maxDepth int) Stack {
 	if maxDepth <= 0 {
 		maxDepth = defaultMaxDepth
 	}
-	// +2 to accommodate captureStack and runtime.Callers frames in the skip math.
+	// +2 accounts for runtime.Callers itself plus captureStack; skip is relative
+	// to the caller of captureStackDefault/captureStack.
 	pc := make([]uintptr, maxDepth)
-	n := runtime.Callers(skip+2, pc) // 0: Callers, 1: captureStack, so add 2
+	n := runtime.Callers(skip+2, pc)
 	if n == 0 {
 		return nil
 	}
@@ -70,7 +72,7 @@ func captureStack(skip, maxDepth int) Stack {
 
 	frames := runtime.CallersFrames(pc)
 	var out Stack
-	out = make(Stack, 0, n)
+	out = make(Stack, 0, n) // prealloc for readability; indexing variant offers negligible gain
 
 	for {
 		fr, more := frames.Next()

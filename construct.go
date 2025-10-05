@@ -1,28 +1,29 @@
 // construct.go — semantic constructors & concrete error types for xgx-error core.
 //
 // Scope (tiny core):
-//   • Provide the three core categories as concrete types: Failure, Defect, Interrupt.
-//   • Implement the xgxerror.Error interface with NON-MUTATING fluent methods.
-//   • Offer pragmatic semantic constructors (domain + infra).
-//   • Keep policy out (no logging/HTTP/JSON/retry policy here).
+//   - Provide the three core categories as concrete types: Failure, Defect, Interrupt.
+//   - Implement the xgxerror.Error interface with NON-MUTATING fluent methods.
+//   - Offer pragmatic semantic constructors (domain + infra).
+//   - Keep policy out (no logging/HTTP/JSON/retry policy here).
 //
 // Interop:
-//   • errors.Is/As work via Unwrap chains (and stdlib errors.Join for multi-error, elsewhere).
-//   • Interrupt unwraps to canonical context errors (context.Canceled / context.DeadlineExceeded).
+//   - errors.Is/As work via Unwrap chains (and stdlib errors.Join for multi-error, elsewhere).
+//   - Interrupt unwraps to canonical context errors (context.Canceled / context.DeadlineExceeded).
 //
 // Notes:
-//   • Copy-on-write everywhere: each fluent method returns a fresh value.
-//   • Context uses the internal []Field representation from context.go.
-//   • Stack capture uses captureStackDefault / captureStack from stack.go.
+//   - Copy-on-write everywhere: each fluent method returns a fresh value.
+//   - Context uses the internal []Field representation from context.go.
+//   - Stack capture uses captureStackDefault / captureStack from stack.go.
 //
 // References:
-//   • Stdlib unwrapping & join semantics (errors.Is/As/Join) — see pkg.go.dev/errors. 
-//   • Canonical context errors (Canceled/DeadlineExceeded) — see pkg.go.dev/context. 
+//   - Stdlib unwrapping & join semantics (errors.Is/As/Join) — see pkg.go.dev/errors.
+//   - Canonical context errors (Canceled/DeadlineExceeded) — see pkg.go.dev/context.
 package xgxerror
 
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 )
 
@@ -59,6 +60,8 @@ func (e *failureErr) CodeVal() Code { return e.code }
 
 func (e *failureErr) Context() map[string]any { return ctxToMap(e.ctx) }
 
+// Ctx appends a short message segment (using ": " as the separator) and
+// optional context fields, returning a NEW error value.
 func (e *failureErr) Ctx(msg string, kv ...any) Error {
 	n := e.clone()
 	switch {
@@ -67,6 +70,51 @@ func (e *failureErr) Ctx(msg string, kv ...any) Error {
 	case msg != "":
 		n.msg = n.msg + ": " + msg
 	}
+	if len(kv) > 0 {
+		n.ctx = ctxCloneAppend(n.ctx, ctxFromKV(kv...)...)
+	}
+	return n
+}
+
+// CtxLast replaces the current message (instead of concatenating) while still
+// appending any provided context fields, returning a NEW error value.
+func (e *failureErr) CtxLast(msg string, kv ...any) Error {
+	n := e.clone()
+	if msg != "" {
+		n.msg = msg
+	}
+	if len(kv) > 0 {
+		n.ctx = ctxCloneAppend(n.ctx, ctxFromKV(kv...)...)
+	}
+	return n
+}
+
+// CtxBound appends a message segment while bounding the history to at most
+// 'limit' segments (keeping the most recent). When limit <= 0 it behaves like
+// CtxLast. Context fields are appended immutably like Ctx.
+func (e *failureErr) CtxBound(msg string, limit int, kv ...any) Error {
+	if limit <= 0 {
+		return e.CtxLast(msg, kv...)
+	}
+
+	n := e.clone()
+
+	var segments []string
+	if n.msg != "" {
+		segments = strings.Split(n.msg, ": ")
+	}
+	if msg != "" {
+		segments = append(segments, msg)
+	}
+	if len(segments) > limit {
+		segments = segments[len(segments)-limit:]
+	}
+	if len(segments) == 0 {
+		n.msg = ""
+	} else {
+		n.msg = strings.Join(segments, ": ")
+	}
+
 	if len(kv) > 0 {
 		n.ctx = ctxCloneAppend(n.ctx, ctxFromKV(kv...)...)
 	}
@@ -99,7 +147,11 @@ func (e *failureErr) clone() *failureErr {
 	n := *e
 	// defensively copy context slice to preserve immutability guarantees
 	if len(e.ctx) > 0 {
-		n.ctx = ctxCloneAppend(emptyFields, e.ctx...)
+		copied := make(fields, len(e.ctx))
+		copy(copied, e.ctx)
+		n.ctx = copied
+	} else {
+		n.ctx = emptyFields
 	}
 	// Stack is immutable value type (slice of frames); shallow copy is fine.
 	return &n
@@ -108,10 +160,10 @@ func (e *failureErr) clone() *failureErr {
 // defectErr models an unexpected programming error (bug/invariant violation).
 // Always captures a stack at creation for debuggability.
 type defectErr struct {
-	msg string
-	ctx fields
+	msg   string
+	ctx   fields
 	cause error
-	stk  Stack
+	stk   Stack
 }
 
 func (e *defectErr) Error() string {
@@ -150,8 +202,10 @@ func (e *defectErr) With(key string, val any) Error {
 	return n
 }
 
+// Code ignores attempts to reclassify a defect. Defects are permanently
+// CodeDefect to preserve invariants, so this returns a clone without applying
+// the supplied code.
 func (e *defectErr) Code(c Code) Error {
-	// Defects are always CodeDefect; ignore changes to keep semantics strong.
 	return e.clone()
 }
 
@@ -219,7 +273,7 @@ func (e *interruptErr) Code(c Code) Error {
 	return e.clone()
 }
 
-func (e *interruptErr) WithStack() Error      { return e.clone() }
+func (e *interruptErr) WithStack() Error        { return e.clone() }
 func (e *interruptErr) WithStackSkip(int) Error { return e.clone() }
 
 func (e *interruptErr) clone() *interruptErr {
@@ -296,6 +350,13 @@ func TooManyRequests(resource string) Error {
 // Internal wraps an underlying error as an internal failure.
 // If err is nil, returns a generic internal error.
 func Internal(err error) Error {
+	if err == nil {
+		return &failureErr{
+			msg:  "internal error",
+			code: CodeInternal,
+			ctx:  emptyFields,
+		}
+	}
 	return (&failureErr{
 		msg:   "internal error",
 		code:  CodeInternal,

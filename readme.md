@@ -2,7 +2,7 @@
 
 Minimal by design: a **small, sharp error model** with perfect stdlib interop, ergonomic context, selective stacks, and zero policy baked in. Build adapters (HTTP, slog, OTel, JSON) **on top**—not in the core.
 
-* **Go**: 1.25+ (uses new `testing/synctest` in tests) ([Go.dev][1])
+* **Go**: 1.25+ (currently pre-release—see [Go 1.25 release notes][1]; uses new `testing/synctest` in tests)
 * **Interop-first**: plays nicely with `errors.Is/As`, `errors.Join`, and formatting via `fmt.Formatter`. ([Go Packages][2])
 
 ---
@@ -14,7 +14,7 @@ Most projects need: (1) a clear taxonomy, (2) rich context without surprises, (3
 * `errors.Is/As` walk both **single** (`Unwrap() error`) **and multi** (`Unwrap() []error`) unwrap graphs; `errors.Join` returns a multi-unwrapper the stdlib traverses. We align to that model exactly. ([Go Packages][2])
 * Stacks captured via `runtime.Callers` + `runtime.CallersFrames` (handles inlined frames correctly). ([Go Packages][3])
 * Verbose formatting driven by `fmt.Formatter` with `%+v` for diagnostics; `%v` stays concise. ([Go Packages][4])
-* Tests use the GA **`testing/synctest`** package (Go 1.25) to deterministically validate copy-on-write immutability and concurrency. ([Go Tour][5])
+* Tests use the new **`testing/synctest`** package landing in Go 1.25 to deterministically validate copy-on-write immutability and concurrency. ([pkg.go.dev/testing/synctest][5])
 
 ---
 
@@ -24,7 +24,7 @@ Most projects need: (1) a clear taxonomy, (2) rich context without surprises, (3
 go get github.com/xgx-io/xgx-error@latest
 ```
 
-Requires Go **1.25+**. ([Go.dev][1])
+Requires Go **1.25+** (currently in preview; see [release notes][1]).
 
 ---
 
@@ -109,14 +109,20 @@ if err != nil {
 
 **Fluent (non-mutating)**
 
-* `.Ctx(msg, kv...)`, `.With(key, val)`, `.Code(code)`
-* `.WithStack()`, `.WithStackSkip(skip)`
+* `.Ctx(msg, kv...)` — appends message segments using `": "` as the separator and returns a fresh error with merged context.
+* `.CtxLast(msg, kv...)` — replaces the current message while appending optional context (great for rewriting summary text).
+* `.CtxBound(msg, limit, kv...)` — appends a segment but keeps only the most recent `limit` message parts (defensive against unbounded growth).
+* `.With(key, val)` — attaches a single field immutably.
+* `.Code(code)` — overrides the classification (no-op for defects/interrupts by design).
+* `.WithStack()` / `.WithStackSkip(skip)` — opt-in stack capture with configurable frame skipping.
 
 **Helpers**
 
 * `From`, `Wrap`, `With`, `Recode`, `WithStack`, `WithStackSkip`
 * `Flatten`, `Walk`, `Root`
 * Predicates: `IsDefect`, `IsInterrupt`, `IsRetryable`, `HasCode`, `CodeOf`, `Has`
+
+`Flatten` collects only leaf errors into a slice, whereas `Walk` visits every node in pre-order and can short-circuit when the callback returns `false`.
 
 **Formatting**
 
@@ -134,7 +140,7 @@ if err != nil {
 * HTTP status mapping, logging, JSON, OTel, retries/backoff.
   Put these in **small add-on modules**:
 
-  * `xgx-error-http` (code→status; `WriteError`)
+  * `xgx-error-http` (code→status; `WriteError`, Problem Details per [RFC 9457][8])
   * `xgx-error-slog` (adapter for `log/slog`) ([Go.dev][7])
   * `xgx-error-json` (classic `encoding/json` + optional `encoding/json/v2`)
   * `xgx-error-otel` (trace/span helpers)
@@ -145,7 +151,7 @@ This keeps the model pure and reusable.
 
 ## Testing & determinism
 
-The repo’s concurrency tests run inside a **`testing/synctest` bubble**: virtual time, deterministic scheduling, and `synctest.Wait()` to advance when all goroutines are blocked—perfect for proving copy-on-write immutability without flaky sleeps. GA in Go 1.25. ([Go Tour][5])
+The repo’s concurrency tests run inside a **`testing/synctest` bubble**: virtual time, deterministic scheduling, and `synctest.Wait()` to advance when all goroutines are blocked—perfect for proving copy-on-write immutability without flaky sleeps. This package lands with Go 1.25. ([pkg.go.dev/testing/synctest][5])
 
 ---
 
@@ -166,11 +172,18 @@ The repo’s concurrency tests run inside a **`testing/synctest` bubble**: virtu
 
 ---
 
-## Performance notes
+## Performance
 
-* Success path: zero allocations in the core.
-* Failure creation: 1 small alloc; context adds are COW.
-* Stack capture: bounded (default depth 64) and only on `Defect` or explicit `.WithStack()`.
+| Operation | Allocations (approx.) | Notes |
+| --- | --- | --- |
+| Success path (no error) | 0 | Hot paths stay allocation-free. |
+| Constructors (e.g., `NotFound`) | 1 | Allocate the concrete error; context slice is pre-sized for provided fields. |
+| `.Ctx` / `.With` | 1 | Copy-on-write context slice; `.Ctx` appends message segments using `": "` as the separator. |
+| `.CtxLast` / `.CtxBound` | 1 | Replace or bound message history while preserving copy-on-write context semantics. |
+| Stack capture (`Defect`, `WithStack*`) | 1 buffer + ~64 frames | Captures up to 64 PCs via `runtime.Callers`; resolved lazily when formatting. |
+| Traversal helpers (`Flatten`, `Walk`) | Leaves slice / none | `Flatten` allocates a slice sized to leaf count; `Walk` uses an internal stack only. |
+
+Traversal helpers execute depth-first search with **O(nodes)** time and **O(depth)** memory. Stack capture work is performed only when you opt in (or when emitting `Defect`).
 
 (Always benchmark in your environment.)
 
@@ -210,10 +223,11 @@ Small surface area, high bar for correctness. Please include:
 
 MIT (see `LICENSE`).
 
-[1]: https://go.dev/blog/go1.25?utm_source=chatgpt.com "Go 1.25 is released"
+[1]: https://tip.golang.org/doc/go1.25?utm_source=chatgpt.com "Go 1.25 Release Notes (pre-release)"
 [2]: https://pkg.go.dev/errors?utm_source=chatgpt.com "errors package"
 [3]: https://pkg.go.dev/runtime?utm_source=chatgpt.com "runtime package"
 [4]: https://pkg.go.dev/fmt?utm_source=chatgpt.com "fmt package - fmt"
-[5]: https://tip.golang.org/doc/go1.25?utm_source=chatgpt.com "Go 1.25 Release Notes"
+[5]: https://pkg.go.dev/testing/synctest?utm_source=chatgpt.com "testing/synctest package"
 [6]: https://github.com/golang/go/issues/69586?utm_source=chatgpt.com "add example around unwrapping errors.Join · Issue #69586"
 [7]: https://go.dev/blog/slog?utm_source=chatgpt.com "Structured Logging with slog"
+[8]: https://www.rfc-editor.org/rfc/rfc9457 "Problem Details for HTTP APIs (RFC 9457)"

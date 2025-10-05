@@ -1,22 +1,23 @@
 // format.go — fmt.Formatter implementations for xgx-error core.
 //
 // Behavior:
-//   %s, %v   → concise string (Error()).
-//   %+v      → verbose, structured multi-line format:
-//                code=<code> msg="<message>"
-//                ctx: key1=val1 key2=val2 ...
-//                cause: <recursively formatted with %+v>
-//                stack:
-//                  funcA file.go:123
-//                  funcB other.go:45
+//
+//	%s, %v   → concise string (Error()).
+//	%+v      → verbose, structured multi-line format:
+//	             code=<code> msg="<message>"
+//	             ctx: key1=val1 key2=val2 ...
+//	             cause: <recursively formatted with %+v>
+//	             stack:
+//	               funcA file.go:123
+//	               funcB other.go:45
 //
 // Rationale:
-//   • Keep core free of logging/HTTP/JSON policy; only fmt formatting.
-//   • Deterministic context order via []Field from context.go.
-//   • Defer cause formatting to fmt with %+v to preserve nested details.
+//   - Keep core free of logging/HTTP/JSON policy; only fmt formatting.
+//   - Deterministic context order via []Field from context.go.
+//   - Defer cause formatting to fmt with %+v to preserve nested details.
 //
 // References:
-//   • fmt.Formatter contract & verbs. :contentReference[oaicite:1]{index=1}
+//   - fmt.Formatter contract & verbs. :contentReference[oaicite:1]{index=1}
 package xgxerror
 
 import (
@@ -143,4 +144,3 @@ func (e *interruptErr) Format(s fmt.State, verb rune) {
 		formatConcise(s, e)
 	}
 }
-

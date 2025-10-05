@@ -21,6 +21,35 @@ func TestConstructors_Basics(t *testing.T) {
 		}
 	})
 
+	t.Run("Internal nil cause does not capture stack", func(t *testing.T) {
+		err := Internal(nil)
+		fe, ok := err.(*failureErr)
+		if !ok {
+			t.Fatalf("expected *failureErr from Internal(nil)")
+		}
+		if fe.cause != nil {
+			t.Fatalf("Internal(nil) should not set a cause; got %v", fe.cause)
+		}
+		if len(fe.stk) != 0 {
+			t.Fatalf("Internal(nil) should not capture a stack; got %d frames", len(fe.stk))
+		}
+	})
+
+	t.Run("Internal with cause captures stack", func(t *testing.T) {
+		cause := errors.New("boom")
+		err := Internal(cause)
+		fe, ok := err.(*failureErr)
+		if !ok {
+			t.Fatalf("expected *failureErr from Internal(cause)")
+		}
+		if fe.cause != cause {
+			t.Fatalf("Internal(cause) should retain cause; got %v", fe.cause)
+		}
+		if len(fe.stk) == 0 {
+			t.Fatalf("Internal(cause) should capture a stack")
+		}
+	})
+
 	t.Run("Defect is defect and unwraps cause", func(t *testing.T) {
 		root := errors.New("boom")
 		err := Defect(root)
@@ -67,6 +96,62 @@ func TestWrapAndFluent_AreNonMutating(t *testing.T) {
 	m["tenant"] = "evil"
 	if aug.Context()["tenant"] != "acme" {
 		t.Fatalf("context map must be copy-on-read")
+	}
+}
+
+func TestFailureCtxVariants(t *testing.T) {
+	base := NotFound("user", 1)
+	chain := base.Ctx("phase one").Ctx("phase two").Ctx("phase three")
+
+	cf, ok := chain.(*failureErr)
+	if !ok {
+		t.Fatalf("expected *failureErr from Ctx chain")
+	}
+	originalMsg := cf.msg
+
+	last := cf.CtxLast("final state", "flag", true)
+	lc, ok := last.(*failureErr)
+	if !ok {
+		t.Fatalf("expected *failureErr from CtxLast")
+	}
+	if lc.msg != "final state" {
+		t.Fatalf("CtxLast should replace message; got %q", lc.msg)
+	}
+	if got := lc.Context()["flag"]; got != true {
+		t.Fatalf("CtxLast context missing flag=true, got=%v", got)
+	}
+	if cf.msg != originalMsg {
+		t.Fatalf("CtxLast mutated original message; got %q want %q", cf.msg, originalMsg)
+	}
+	if _, ok := cf.Context()["flag"]; ok {
+		t.Fatalf("CtxLast should not mutate original context")
+	}
+
+	bounded := cf.CtxBound("phase four", 3, "attempt", 4)
+	bc, ok := bounded.(*failureErr)
+	if !ok {
+		t.Fatalf("expected *failureErr from CtxBound")
+	}
+	if bc.msg != "phase two: phase three: phase four" {
+		t.Fatalf("CtxBound should keep most recent segments; got %q", bc.msg)
+	}
+	if got := bc.Context()["attempt"]; got != 4 {
+		t.Fatalf("CtxBound context missing attempt=4, got=%v", got)
+	}
+	if _, ok := cf.Context()["attempt"]; ok {
+		t.Fatalf("CtxBound should not mutate original context")
+	}
+
+	reset := cf.CtxBound("reset", 0)
+	rc, ok := reset.(*failureErr)
+	if !ok {
+		t.Fatalf("expected *failureErr from bounded reset")
+	}
+	if rc.msg != "reset" {
+		t.Fatalf("limit <= 0 should behave like CtxLast; got %q", rc.msg)
+	}
+	if strings.Count(cf.msg, ": ") != 2 {
+		t.Fatalf("original message should retain three segments; got %q", cf.msg)
 	}
 }
 

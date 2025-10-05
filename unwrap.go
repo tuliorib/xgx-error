@@ -1,16 +1,16 @@
 // unwrap.go — stdlib-interop helpers for unwrapping errors.
 //
 // Scope (tiny core):
-//   • Generic traversal over single- and multi-wrapped errors.
-//   • DFS flattening that cooperates with errors.Join (Unwrap() []error) and
+//   - Generic traversal over single- and multi-wrapped errors.
+//   - DFS flattening that cooperates with errors.Join (Unwrap() []error) and
 //     classic wrapping (Unwrap() error).
-//   • No policy, no logging — just correct, minimal utilities.
+//   - No policy, no logging — just correct, minimal utilities.
 //
 // Notes:
-//   • Go defines two Unwrap forms: Unwrap() error and Unwrap() []error.
+//   - Go defines two Unwrap forms: Unwrap() error and Unwrap() []error.
 //     errors.Is / errors.As already traverse both; these helpers expose a
 //     programmatic traversal (e.g., for collecting leaves).
-//   • We avoid allocations on fast paths and guard against pathological depth.
+//   - We avoid allocations on fast paths and guard against pathological depth.
 package xgxerror
 
 import (
@@ -28,12 +28,13 @@ type multiUnwrapper interface {
 }
 
 // Flatten walks an error tree and returns a slice of leaf errors in depth-first
-// order. For joined errors (Unwrap() []error), all branches are explored.
+// order (nodes with no children). For joined errors (Unwrap() []error), all
+// branches are explored.
 // nil yields nil.
 //
 // Guarantees:
-//   • The returned slice contains only non-nil errors.
-//   • Duplicates may appear if the same leaf is reachable via multiple paths.
+//   - The returned slice contains only non-nil errors.
+//   - Duplicates may appear if the same leaf is reachable via multiple paths.
 //     (Cycle protection prevents infinite loops.)
 func Flatten(err error) []error {
 	if err == nil {
@@ -110,7 +111,8 @@ func Flatten(err error) []error {
 }
 
 // Walk traverses an error graph depth-first and calls visit for each distinct
-// error encountered (pre-order). If visit returns false, traversal stops early.
+// error encountered in pre-order (all nodes, not just leaves). If visit returns
+// false, traversal stops early.
 // nil is a no-op.
 //
 // Walk is useful for custom searches without allocating a slice like Flatten.
@@ -143,7 +145,7 @@ func Walk(err error, visit func(error) bool) {
 		// Expand children (multi first, then single) to mirror Flatten.
 		if m, ok := top.e.(multiUnwrapper); ok {
 			children := m.Unwrap()
-			// push in reverse so that we visit children in natural order
+			// push in reverse so DFS visits children left-to-right in natural order
 			for i := len(children) - 1; i >= 0; i-- {
 				if c := children[i]; c != nil {
 					stack = append(stack, frame{e: c})
