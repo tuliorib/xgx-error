@@ -10,9 +10,9 @@ import (
 
 // Test that errors.Join exposes all leaves to errors.Is/As and our helpers.
 func TestJoin_IsAsAndHelpers(t *testing.T) {
-	a := NotFound("user", 1)              // Failure w/ CodeNotFound
-	b := Invalid("email", "bad format")   // Failure w/ CodeInvalid
-	joined := errors.Join(a, b)           // Go 1.20+: Unwrap() []error; Is/As traverse. 
+	a := NotFound("user", 1)            // Failure w/ CodeNotFound
+	b := Invalid("email", "bad format") // Failure w/ CodeInvalid
+	joined := errors.Join(a, b)         // Go 1.20+: Unwrap() []error; Is/As traverse.
 
 	// stdlib traversal must find both leaves
 	if !errors.Is(joined, a) || !errors.Is(joined, b) {
