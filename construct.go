@@ -58,6 +58,29 @@ func (e *failureErr) Unwrap() error           { return e.cause }
 func (e *failureErr) CodeVal() Code           { return e.code }
 func (e *failureErr) Context() map[string]any { return ctxToMap(e.ctx) }
 
+// forEachField provides a package-private, zero-alloc iterator over fields.
+// It iterates from newest to oldest (reverse order) so callers can honor
+// last-write-wins by stopping at the first match.
+func (e *failureErr) forEachField(fn func(k string, v any) bool) {
+	for i := len(e.ctx) - 1; i >= 0; i-- {
+		f := e.ctx[i]
+		if !fn(f.Key, f.Val) {
+			return
+		}
+	}
+}
+
+// lookupFieldLast returns the last (newest) value for key, honoring last-write-wins.
+func (e *failureErr) lookupFieldLast(key string) (any, bool) {
+	for i := len(e.ctx) - 1; i >= 0; i-- {
+		f := e.ctx[i]
+		if f.Key == key {
+			return f.Val, true
+		}
+	}
+	return nil, false
+}
+
 // -------- Message API --------
 
 func (e *failureErr) MsgReplace(msg string) Error {
@@ -177,6 +200,27 @@ func (e *defectErr) Unwrap() error           { return e.cause }
 func (e *defectErr) CodeVal() Code           { return CodeDefect }
 func (e *defectErr) Context() map[string]any { return ctxToMap(e.ctx) }
 
+// forEachField: newest-to-oldest to preserve last-write-wins semantics.
+func (e *defectErr) forEachField(fn func(k string, v any) bool) {
+	for i := len(e.ctx) - 1; i >= 0; i-- {
+		f := e.ctx[i]
+		if !fn(f.Key, f.Val) {
+			return
+		}
+	}
+}
+
+// lookupFieldLast returns the last (newest) value for key, honoring last-write-wins.
+func (e *defectErr) lookupFieldLast(key string) (any, bool) {
+	for i := len(e.ctx) - 1; i >= 0; i-- {
+		f := e.ctx[i]
+		if f.Key == key {
+			return f.Val, true
+		}
+	}
+	return nil, false
+}
+
 // -------- Message API --------
 
 func (e *defectErr) MsgReplace(msg string) Error {
@@ -273,6 +317,27 @@ func (e *interruptErr) Error() string {
 func (e *interruptErr) Unwrap() error           { return e.cause }
 func (e *interruptErr) CodeVal() Code           { return CodeInterrupt }
 func (e *interruptErr) Context() map[string]any { return ctxToMap(e.ctx) }
+
+// forEachField: newest-to-oldest to preserve last-write-wins semantics.
+func (e *interruptErr) forEachField(fn func(k string, v any) bool) {
+	for i := len(e.ctx) - 1; i >= 0; i-- {
+		f := e.ctx[i]
+		if !fn(f.Key, f.Val) {
+			return
+		}
+	}
+}
+
+// lookupFieldLast returns the last (newest) value for key, honoring last-write-wins.
+func (e *interruptErr) lookupFieldLast(key string) (any, bool) {
+	for i := len(e.ctx) - 1; i >= 0; i-- {
+		f := e.ctx[i]
+		if f.Key == key {
+			return f.Val, true
+		}
+	}
+	return nil, false
+}
 
 // -------- Message API --------
 
