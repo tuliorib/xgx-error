@@ -15,10 +15,10 @@
 //   - Context uses the internal []Field representation from context.go.
 //   - Stack capture uses captureStackDefault / captureStack from stack.go.
 //
-// Formatting & message semantics (v1):
-//   - .Ctx(...) and .CtxBound(...) DO NOT concatenate messages; the message stays stable.
-//     If msg is empty on the receiver and a non-empty msg is provided, it is set once.
-//     Additional details belong in structured context (kv), not in growing ": "-joined strings.
+// Message semantics (v1):
+//   - Ctx(...) / CtxBound(...): DO NOT concatenate; set message once iff empty; always add fields.
+//   - MsgReplace(msg): explicit overwrite of message.
+//   - MsgAppend(msg): explicit chaining with ": " separator (no-op if msg == "").
 package xgxerror
 
 import (
@@ -54,9 +54,32 @@ func (e *failureErr) Error() string {
 	return e.msg
 }
 
-func (e *failureErr) Unwrap() error             { return e.cause }
-func (e *failureErr) CodeVal() Code             { return e.code }
-func (e *failureErr) Context() map[string]any   { return ctxToMap(e.ctx) }
+func (e *failureErr) Unwrap() error           { return e.cause }
+func (e *failureErr) CodeVal() Code           { return e.code }
+func (e *failureErr) Context() map[string]any { return ctxToMap(e.ctx) }
+
+// -------- Message API --------
+
+func (e *failureErr) MsgReplace(msg string) Error {
+	n := e.clone()
+	n.msg = msg
+	return n
+}
+
+func (e *failureErr) MsgAppend(msg string) Error {
+	if msg == "" {
+		return e.clone()
+	}
+	n := e.clone()
+	if n.msg == "" {
+		n.msg = msg
+	} else {
+		n.msg = n.msg + ": " + msg
+	}
+	return n
+}
+
+// -------- Context API --------
 
 // Ctx attaches optional structured context and, if the current message is empty,
 // sets it to the provided msg. It does NOT concatenate messages.
@@ -154,6 +177,29 @@ func (e *defectErr) Unwrap() error           { return e.cause }
 func (e *defectErr) CodeVal() Code           { return CodeDefect }
 func (e *defectErr) Context() map[string]any { return ctxToMap(e.ctx) }
 
+// -------- Message API --------
+
+func (e *defectErr) MsgReplace(msg string) Error {
+	n := e.clone()
+	n.msg = msg
+	return n
+}
+
+func (e *defectErr) MsgAppend(msg string) Error {
+	if msg == "" {
+		return e.clone()
+	}
+	n := e.clone()
+	if n.msg == "" {
+		n.msg = msg
+	} else {
+		n.msg = n.msg + ": " + msg
+	}
+	return n
+}
+
+// -------- Context API --------
+
 // Ctx: identical message semantics to failureErr — no concatenation.
 func (e *defectErr) Ctx(msg string, kv ...any) Error {
 	n := e.clone()
@@ -228,6 +274,29 @@ func (e *interruptErr) Unwrap() error           { return e.cause }
 func (e *interruptErr) CodeVal() Code           { return CodeInterrupt }
 func (e *interruptErr) Context() map[string]any { return ctxToMap(e.ctx) }
 
+// -------- Message API --------
+
+func (e *interruptErr) MsgReplace(msg string) Error {
+	n := e.clone()
+	n.msg = msg
+	return n
+}
+
+func (e *interruptErr) MsgAppend(msg string) Error {
+	if msg == "" {
+		return e.clone()
+	}
+	n := e.clone()
+	if n.msg == "" {
+		n.msg = msg
+	} else {
+		n.msg = n.msg + ": " + msg
+	}
+	return n
+}
+
+// -------- Context API --------
+
 // Ctx: identical message semantics — no concatenation.
 func (e *interruptErr) Ctx(msg string, kv ...any) Error {
 	n := e.clone()
@@ -266,9 +335,9 @@ func (e *interruptErr) With(key string, val any) Error {
 	return n
 }
 
-func (e *interruptErr) Code(c Code) Error        { return e.clone() } // fixed class
-func (e *interruptErr) WithStack() Error         { return e.clone() } // no stacks for interrupts
-func (e *interruptErr) WithStackSkip(int) Error  { return e.clone() }
+func (e *interruptErr) Code(c Code) Error       { return e.clone() } // fixed class
+func (e *interruptErr) WithStack() Error        { return e.clone() } // no stacks for interrupts
+func (e *interruptErr) WithStackSkip(int) Error { return e.clone() }
 
 func (e *interruptErr) clone() *interruptErr {
 	n := *e

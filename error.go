@@ -19,9 +19,11 @@
 //     so stdlib traversal (errors.Is/As) observes full causal chains.
 //
 // Notes on semantics (normative):
-//   - Message chaining (Ctx): if the current message is empty, it becomes msg;
-//     if msg is empty, message is unchanged (but kv fields are still added);
-//     otherwise message = old + ": " + msg.
+//   - Message semantics:
+//       • Ctx: sets the message once IFF the current message is empty; otherwise
+//         it leaves the message untouched. Use MsgAppend/MsgReplace for message control.
+//       • MsgAppend: explicitly concatenates using ": " as a separator.
+//       • MsgReplace: explicitly overwrites the message.
 //   - Context fields (Ctx/CtxBound/With): appended in call order as key/value
 //     pairs. Non-string "key" causes the entire pair (key and its following
 //     value, if any) to be dropped to avoid misalignment. A trailing key with
@@ -61,11 +63,33 @@ type Error interface {
 	// rich export (JSON, structured logs) belongs to adapters outside the core.
 	error
 
-	// Ctx attaches a short contextual message and optional key-value fields.
-	// Keys should be snake_case for consistency. Returns a NEW Error.
+	// -------- Message API --------
+
+	// MsgReplace overwrites the human-readable message with msg.
+	// Returns a NEW Error.
 	//
 	// Example:
+	//   err = err.MsgReplace("fetch failed")
+	MsgReplace(msg string) Error
+
+	// MsgAppend appends msg to the existing message, using ": " as a separator.
+	// If the current message is empty, it behaves like MsgReplace.
+	// Returns a NEW Error.
+	//
+	// Example:
+	//   err = err.MsgAppend("query failed").MsgAppend("retrying")
+	MsgAppend(msg string) Error
+
+	// -------- Context API --------
+
+	// Ctx attaches a short contextual message (set once IFF empty) and optional
+	// key-value fields. Keys should be snake_case for consistency. Returns a NEW Error.
+	//
+	// Examples:
+	//   // sets message if empty; always adds fields
 	//   err = err.Ctx("query failed", "table", "users", "elapsed_ms", 12.7)
+	//   // leave message unchanged, add only fields
+	//   err = err.Ctx("", "attempt", n)
 	Ctx(msg string, kv ...any) Error
 
 	// CtxBound behaves like Ctx but enforces a maximum number of total context
@@ -83,6 +107,8 @@ type Error interface {
 	//   err = err.With("user_id", 42)
 	With(key string, val any) Error
 
+	// -------- Classification / Code --------
+
 	// Code sets or overrides the classification code. Returns a NEW Error.
 	//
 	// Example:
@@ -91,6 +117,8 @@ type Error interface {
 
 	// CodeVal returns the current classification code, or "" if unset.
 	CodeVal() Code
+
+	// -------- Stack capture --------
 
 	// WithStack returns a new Error that includes a captured stack trace
 	// starting at the call site. Implementations SHOULD bound the number of
@@ -102,9 +130,11 @@ type Error interface {
 	// useful to hide adapter/helper frames in wrappers.
 	WithStackSkip(skip int) Error
 
-	// Context returns a new map containing the structured context fields, or
-	// nil if there are none. The map is a copy; mutating it does not affect
-	// the Error (copy-on-read).
+	// -------- Introspection --------
+
+	// Context returns a new, non-nil map containing the structured context fields.
+	// The map is a copy; mutating it does not affect the Error (copy-on-read).
+	// Callers MUST treat the returned map as their own—core does not retain it.
 	Context() map[string]any
 
 	// Unwrap returns the immediate cause (if any) to support errors.Is/As.
