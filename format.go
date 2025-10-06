@@ -2,14 +2,14 @@
 //
 // Behavior:
 //
-//   %s, %v   → concise string (Error()).
-//   %+v      → verbose, structured multi-line format:
-//                code=<code> msg="<message>"
-//                ctx: key1=val1 key2=val2 ...
-//                cause: <recursively formatted with %+v>
-//                stack:
-//                  funcA file.go:123
-//                  funcB other.go:45
+//	%s, %v   → concise string (Error()).
+//	%+v      → verbose, structured multi-line format:
+//	             code=<code> msg="<message>"
+//	             ctx: key1=val1 key2=val2 ...   // omitted if no printable fields
+//	             cause: <recursively formatted with %+v> // omitted if cause == nil
+//	             stack:
+//	               funcA file.go:123
+//	               funcB other.go:45
 //
 // Rationale:
 //   - Keep core free of logging/HTTP/JSON policy; only fmt formatting.
@@ -31,6 +31,7 @@ func formatConcise(w io.Writer, e error) {
 // formatVerbose writes a structured multi-line representation.
 // If stk is nil/empty, the stack section is omitted.
 // If cause is non-nil, it is formatted with %+v to recurse verbosely.
+// If, after filtering, there are no printable context fields, the ctx: line is omitted.
 func formatVerbose(w io.Writer, code Code, msg string, ctx fields, cause error, stk Stack) {
 	// Header: code + msg
 	if code != "" {
@@ -39,8 +40,16 @@ func formatVerbose(w io.Writer, code Code, msg string, ctx fields, cause error, 
 	// Always quote message for clarity (even if empty).
 	_, _ = fmt.Fprintf(w, "msg=%q", msg)
 
-	// Context (ordered, space-separated key=val)
-	if len(ctx) > 0 {
+	// --- Context (ordered, space-separated key=val) ---
+	// Only print "ctx:" if there's at least one field with a non-empty key.
+	hasPrintableCtx := false
+	for i := 0; i < len(ctx); i++ {
+		if ctx[i].Key != "" {
+			hasPrintableCtx = true
+			break
+		}
+	}
+	if hasPrintableCtx {
 		_, _ = io.WriteString(w, "\nctx:")
 		for _, f := range ctx {
 			// Print key only if non-empty; values are %v for generality.
@@ -50,14 +59,15 @@ func formatVerbose(w io.Writer, code Code, msg string, ctx fields, cause error, 
 		}
 	}
 
-	// Cause
+	// --- Cause ---
+	// Suppress cause section when cause == nil.
 	if cause != nil {
 		_, _ = io.WriteString(w, "\ncause: ")
 		// Recurse with %+v so nested stacks/contexts render if available.
 		_, _ = fmt.Fprintf(w, "%+v", cause)
 	}
 
-	// Stack frames (most recent first)
+	// --- Stack frames (most recent first) ---
 	if len(stk) > 0 {
 		_, _ = io.WriteString(w, "\nstack:")
 		for _, fr := range stk {

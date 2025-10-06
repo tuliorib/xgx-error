@@ -27,6 +27,17 @@ import (
 	"time"
 )
 
+// defaultInternalMsg is the standardized default for internal failures.
+const defaultInternalMsg = "internal error"
+
+// msgOrDefaultInternal returns msg if non-empty, otherwise the standardized default.
+func msgOrDefaultInternal(msg string) string {
+	if msg != "" {
+		return msg
+	}
+	return defaultInternalMsg
+}
+
 // -----------------------------------------------------------------------------
 // Concrete types
 // -----------------------------------------------------------------------------
@@ -121,6 +132,14 @@ func (e *failureErr) Ctx(msg string, kv ...any) Error {
 // CtxBound behaves like Ctx but enforces a maximum number of TOTAL context
 // fields. When the total would exceed maxFields, it keeps the newest fields and
 // drops the oldest until total <= maxFields. If maxFields <= 0, no bound is applied.
+//
+// Example:
+//
+//	// Given [a,b,c,d,e] and max=3 → keeps [c,d,e] (newest).
+//
+// Guidance:
+//
+//	// For must-keep identifiers (e.g., request_id, tenant), prefer typed fields.
 //
 // Message semantics are identical to Ctx: no concatenation; set once if empty.
 func (e *failureErr) CtxBound(msg string, maxFields int, kv ...any) Error {
@@ -257,6 +276,14 @@ func (e *defectErr) Ctx(msg string, kv ...any) Error {
 }
 
 // CtxBound: identical message semantics; enforces maxFields bound.
+//
+// Example:
+//
+//	// Given [a,b,c,d,e] and max=3 → keeps [c,d,e] (newest).
+//
+// Guidance:
+//
+//	// For must-keep identifiers (e.g., request_id, tenant), prefer typed fields.
 func (e *defectErr) CtxBound(msg string, maxFields int, kv ...any) Error {
 	n := e.clone()
 	if msg != "" && n.msg == "" {
@@ -377,6 +404,14 @@ func (e *interruptErr) Ctx(msg string, kv ...any) Error {
 // CtxBound behaves like Ctx but enforces a maximum number of TOTAL context
 // fields. When the total would exceed maxFields, it keeps the newest fields and
 // drops the oldest until total <= maxFields. If maxFields <= 0, no bound is applied.
+//
+// Example:
+//
+//	// Given [a,b,c,d,e] and max=3 → keeps [c,d,e] (newest).
+//
+// Guidance:
+//
+//	// For must-keep identifiers (e.g., request_id, tenant), prefer typed fields.
 func (e *interruptErr) CtxBound(msg string, maxFields int, kv ...any) Error {
 	n := e.clone()
 	if msg != "" && n.msg == "" {
@@ -483,7 +518,7 @@ func TooManyRequests(resource string) Error {
 // boundary is still debuggable.
 func Internal(err error) Error {
 	fe := &failureErr{
-		msg:   "internal error",
+		msg:   defaultInternalMsg,
 		code:  CodeInternal,
 		ctx:   emptyFields,
 		cause: err,
@@ -557,14 +592,19 @@ func InterruptDeadline(reason string) Error {
 // Message semantics: same as per-type .Ctx — no concatenation; set once if empty.
 func Ctx(err error, msg string, kv ...any) Error {
 	if err == nil {
-		// Create a generic failure with context only.
-		return (&failureErr{msg: msg, code: CodeInternal, ctx: ctxFromKV(kv...)}).clone()
+		// Create a generic internal failure with (possibly empty) message and context.
+		return (&failureErr{
+			msg:  msgOrDefaultInternal(msg),
+			code: CodeInternal,
+			ctx:  ctxFromKV(kv...),
+		}).clone()
 	}
 	if xe, ok := err.(Error); ok {
+		// Respect set-once semantics inside implementation; do not force a default here.
 		return xe.Ctx(msg, kv...)
 	}
 	return (&failureErr{
-		msg:   msg,
+		msg:   msgOrDefaultInternal(msg),
 		code:  CodeInternal,
 		ctx:   ctxFromKV(kv...),
 		cause: err,
@@ -574,7 +614,11 @@ func Ctx(err error, msg string, kv ...any) Error {
 // New creates a new internal failure with a message and optional context.
 // Prefer semantic constructors when possible.
 func New(msg string, kv ...any) Error {
-	return &failureErr{msg: msg, code: CodeInternal, ctx: ctxFromKV(kv...)}
+	return &failureErr{
+		msg:  msgOrDefaultInternal(msg),
+		code: CodeInternal,
+		ctx:  ctxFromKV(kv...),
+	}
 }
 
 // -----------------------------------------------------------------------------
