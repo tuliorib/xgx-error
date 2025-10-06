@@ -5,71 +5,45 @@
 //   - Keep semantics open-ended: no HTTP/status/retry policy in core.
 //   - Allow projects to extend with their own codes without a central registry.
 //
-// Notes:
-//   - Codes are strings to preserve stability across logs/JSON and avoid
-//     breaking changes from enum edits.
-//   - Higher-level modules (e.g., xgx-error-http, xgx-error-retry) may
-//     interpret these codes; core does not.
+// Conventions (documented, not enforced here):
+//   - Codes are lowercase snake_case ASCII.
+//   - Avoid the empty string for custom codes; it is never a built-in.
+//   - Higher-level modules (e.g., xgx-error-http, xgx-error-retry) may interpret codes;
+//     core does not attach policy or retry semantics.
 package xgxerror
 
-// Built-in codes commonly used across domains and infrastructure.
-//
-// Groups (informative, not enforced):
-//
-//   Domain (often analogous to 4xx): bad_request, unauthorized, forbidden,
-//   not_found, conflict, invalid, unprocessable, too_many_requests.
-//
-//   Infrastructure (often analogous to 5xx): internal, timeout, unavailable.
-//
-//   Special: defect (programming bug), interrupt (cancellation/deadline).
+// NOTE: Code type is declared in error.go. Invariants are documented there.
+
+// Domain / validation
 const (
-	// Domain-oriented
 	CodeBadRequest      Code = "bad_request"
 	CodeUnauthorized    Code = "unauthorized"
 	CodeForbidden       Code = "forbidden"
 	CodeNotFound        Code = "not_found"
 	CodeConflict        Code = "conflict"
 	CodeInvalid         Code = "invalid"
-	CodeUnprocessable   Code = "unprocessable"     // e.g., validation failed after syntax accepted
-	CodeTooManyRequests Code = "too_many_requests" // throttling, quotas
-
-	// Infrastructure-oriented
-	CodeInternal    Code = "internal"
-	CodeTimeout     Code = "timeout"
-	CodeUnavailable Code = "unavailable"
-
-	// Special classifications
-	CodeDefect    Code = "defect"    // programmer error / invariant violation
-	CodeInterrupt Code = "interrupt" // context cancellation or deadline
+	CodeUnprocessable   Code = "unprocessable"
+	CodeTooManyRequests Code = "too_many_requests"
 )
 
-// String implements fmt.Stringer for convenience in logs/tests.
-func (c Code) String() string { return string(c) }
+// Availability / time
+const (
+	CodeTimeout     Code = "timeout"
+	CodeUnavailable Code = "unavailable"
+)
 
-// IsBuiltin reports whether the code is one of the built-in core codes.
-// Empty codes return false.
-func (c Code) IsBuiltin() bool {
-	if c == "" {
-		return false
-	}
-	for _, builtin := range allBuiltinCodes {
-		if c == builtin {
-			return true
-		}
-	}
-	return false
-}
+// Internal / meta
+const (
+	CodeInternal  Code = "internal"
+	CodeDefect    Code = "defect"
+	CodeInterrupt Code = "interrupt"
+)
 
-// BuiltinCodes returns a copy of the built-in codes in stable order.
-// Callers may freely modify the returned slice without affecting the package.
-func BuiltinCodes() []Code {
-	out := make([]Code, len(allBuiltinCodes))
-	copy(out, allBuiltinCodes)
-	return out
-}
-
-// Unexported canonical list to avoid exposing mutable package state.
+// allBuiltinCodes is the ordered set of codes the core ships with.
+// Unexported to avoid exposing mutable slice identity to callers.
+// Order is stable to minimize churn in docs/examples.
 var allBuiltinCodes = []Code{
+	// Domain / validation (8)
 	CodeBadRequest,
 	CodeUnauthorized,
 	CodeForbidden,
@@ -78,9 +52,45 @@ var allBuiltinCodes = []Code{
 	CodeInvalid,
 	CodeUnprocessable,
 	CodeTooManyRequests,
-	CodeInternal,
+
+	// Availability / time (2)
 	CodeTimeout,
 	CodeUnavailable,
+
+	// Internal / meta (3)
+	CodeInternal,
 	CodeDefect,
 	CodeInterrupt,
+}
+
+// builtinCodeSet provides O(1) membership checks for built-ins.
+// Declared via composite literal to avoid runtime init loops.
+var builtinCodeSet = map[Code]struct{}{
+	CodeBadRequest:      {},
+	CodeUnauthorized:    {},
+	CodeForbidden:       {},
+	CodeNotFound:        {},
+	CodeConflict:        {},
+	CodeInvalid:         {},
+	CodeUnprocessable:   {},
+	CodeTooManyRequests: {},
+	CodeTimeout:         {},
+	CodeUnavailable:     {},
+	CodeInternal:        {},
+	CodeDefect:          {},
+	CodeInterrupt:       {},
+}
+
+// BuiltinCodes returns a defensive copy of the built-in codes in a stable order.
+func BuiltinCodes() []Code {
+	out := make([]Code, len(allBuiltinCodes))
+	copy(out, allBuiltinCodes)
+	return out
+}
+
+// IsBuiltin reports whether c is one of the built-in core codes.
+// This is ergonomics-only; projects may define and use custom codes freely.
+func (c Code) IsBuiltin() bool {
+	_, ok := builtinCodeSet[c]
+	return ok
 }

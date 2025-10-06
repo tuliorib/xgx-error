@@ -64,21 +64,17 @@ func IsInterrupt(err error) bool {
 	return errors.As(err, &c) && c.CodeVal() == CodeInterrupt
 }
 
-// HasCode reports whether any node in the unwrap graph carries the given code.
-// Scans ALL branches (including errors.Join).
-func HasCode(err error, code Code) bool {
-	if err == nil {
-		return false
-	}
-	found := false
-	Walk(err, func(e error) bool {
-		if c, ok := e.(coder); ok && c.CodeVal() == code {
-			found = true
-			return false // early exit
-		}
-		return true
-	})
-	return found
+// HasCode reports whether any node in the graph carries the given code.
+func HasCode(err error, want Code) bool {
+    found := false
+    Walk(err, func(e error) bool {
+        if xe, ok := e.(Error); ok && xe.CodeVal() == want {
+            found = true
+            return false // stop early
+        }
+        return true
+    })
+    return found
 }
 
 // IsRetryable is a tiny, policy-free heuristic based on commonly transient codes.
@@ -102,15 +98,15 @@ func IsRetryable(err error) bool {
 	return retryable
 }
 
-// CodeOf returns the first discovered Code along err's chain (first match)
-// or "" if none. Uses errors.As to respect stdlib traversal order.
+// CodeOf returns the first code encountered in DFS order (or "").
 func CodeOf(err error) Code {
-	if err == nil {
-		return ""
-	}
-	var c coder
-	if errors.As(err, &c) {
-		return c.CodeVal()
-	}
-	return ""
+    var out Code
+    Walk(err, func(e error) bool {
+        if xe, ok := e.(Error); ok {
+            out = xe.CodeVal()
+            return false
+        }
+        return true
+    })
+    return out
 }

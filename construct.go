@@ -15,9 +15,10 @@
 //   - Context uses the internal []Field representation from context.go.
 //   - Stack capture uses captureStackDefault / captureStack from stack.go.
 //
-// References:
-//   - Stdlib unwrapping & join semantics (errors.Is/As/Join) — see pkg.go.dev/errors.
-//   - Canonical context errors (Canceled/DeadlineExceeded) — see pkg.go.dev/context.
+// Formatting & message semantics (v1):
+//   - .Ctx(...) and .CtxBound(...) DO NOT concatenate messages; the message stays stable.
+//     If msg is empty on the receiver and a non-empty msg is provided, it is set once.
+//     Additional details belong in structured context (kv), not in growing ": "-joined strings.
 package xgxerror
 
 import (
@@ -53,19 +54,17 @@ func (e *failureErr) Error() string {
 	return e.msg
 }
 
-func (e *failureErr) Unwrap() error   { return e.cause }
-func (e *failureErr) CodeVal() Code   { return e.code }
-func (e *failureErr) Context() map[string]any { return ctxToMap(e.ctx) }
+func (e *failureErr) Unwrap() error             { return e.cause }
+func (e *failureErr) CodeVal() Code             { return e.code }
+func (e *failureErr) Context() map[string]any   { return ctxToMap(e.ctx) }
 
-// Ctx appends a short message segment (using ": " as the separator) and
-// optional context fields, returning a NEW error value.
+// Ctx attaches optional structured context and, if the current message is empty,
+// sets it to the provided msg. It does NOT concatenate messages.
+// Use context fields for progressive detail rather than string chaining.
 func (e *failureErr) Ctx(msg string, kv ...any) Error {
 	n := e.clone()
-	switch {
-	case n.msg == "":
+	if msg != "" && n.msg == "" {
 		n.msg = msg
-	case msg != "":
-		n.msg = n.msg + ": " + msg
 	}
 	if len(kv) > 0 {
 		n.ctx = ctxCloneAppend(n.ctx, ctxFromKV(kv...)...)
@@ -76,13 +75,12 @@ func (e *failureErr) Ctx(msg string, kv ...any) Error {
 // CtxBound behaves like Ctx but enforces a maximum number of TOTAL context
 // fields. When the total would exceed maxFields, it keeps the newest fields and
 // drops the oldest until total <= maxFields. If maxFields <= 0, no bound is applied.
+//
+// Message semantics are identical to Ctx: no concatenation; set once if empty.
 func (e *failureErr) CtxBound(msg string, maxFields int, kv ...any) Error {
 	n := e.clone()
-	switch {
-	case n.msg == "":
+	if msg != "" && n.msg == "" {
 		n.msg = msg
-	case msg != "":
-		n.msg = n.msg + ": " + msg
 	}
 	if len(kv) > 0 {
 		n.ctx = ctxCloneAppend(n.ctx, ctxFromKV(kv...)...)
@@ -129,7 +127,7 @@ func (e *failureErr) clone() *failureErr {
 	} else {
 		n.ctx = emptyFields
 	}
-	// Stack is immutable value type (slice of frames); shallow copy is fine.
+	// Stack is an immutable value type (slice of frames); shallow copy is fine.
 	return &n
 }
 
@@ -152,17 +150,15 @@ func (e *defectErr) Error() string {
 	return "defect"
 }
 
-func (e *defectErr) Unwrap() error             { return e.cause }
-func (e *defectErr) CodeVal() Code             { return CodeDefect }
-func (e *defectErr) Context() map[string]any   { return ctxToMap(e.ctx) }
+func (e *defectErr) Unwrap() error           { return e.cause }
+func (e *defectErr) CodeVal() Code           { return CodeDefect }
+func (e *defectErr) Context() map[string]any { return ctxToMap(e.ctx) }
 
+// Ctx: identical message semantics to failureErr — no concatenation.
 func (e *defectErr) Ctx(msg string, kv ...any) Error {
 	n := e.clone()
-	switch {
-	case n.msg == "":
+	if msg != "" && n.msg == "" {
 		n.msg = msg
-	case msg != "":
-		n.msg = n.msg + ": " + msg
 	}
 	if len(kv) > 0 {
 		n.ctx = ctxCloneAppend(n.ctx, ctxFromKV(kv...)...)
@@ -170,16 +166,11 @@ func (e *defectErr) Ctx(msg string, kv ...any) Error {
 	return n
 }
 
-// CtxBound behaves like Ctx but enforces a maximum number of TOTAL context
-// fields. When the total would exceed maxFields, it keeps the newest fields and
-// drops the oldest until total <= maxFields. If maxFields <= 0, no bound is applied.
+// CtxBound: identical message semantics; enforces maxFields bound.
 func (e *defectErr) CtxBound(msg string, maxFields int, kv ...any) Error {
 	n := e.clone()
-	switch {
-	case n.msg == "":
+	if msg != "" && n.msg == "" {
 		n.msg = msg
-	case msg != "":
-		n.msg = n.msg + ": " + msg
 	}
 	if len(kv) > 0 {
 		n.ctx = ctxCloneAppend(n.ctx, ctxFromKV(kv...)...)
@@ -237,13 +228,11 @@ func (e *interruptErr) Unwrap() error           { return e.cause }
 func (e *interruptErr) CodeVal() Code           { return CodeInterrupt }
 func (e *interruptErr) Context() map[string]any { return ctxToMap(e.ctx) }
 
+// Ctx: identical message semantics — no concatenation.
 func (e *interruptErr) Ctx(msg string, kv ...any) Error {
 	n := e.clone()
-	switch {
-	case n.msg == "":
+	if msg != "" && n.msg == "" {
 		n.msg = msg
-	case msg != "":
-		n.msg = n.msg + ": " + msg
 	}
 	if len(kv) > 0 {
 		n.ctx = ctxCloneAppend(n.ctx, ctxFromKV(kv...)...)
@@ -256,11 +245,8 @@ func (e *interruptErr) Ctx(msg string, kv ...any) Error {
 // drops the oldest until total <= maxFields. If maxFields <= 0, no bound is applied.
 func (e *interruptErr) CtxBound(msg string, maxFields int, kv ...any) Error {
 	n := e.clone()
-	switch {
-	case n.msg == "":
+	if msg != "" && n.msg == "" {
 		n.msg = msg
-	case msg != "":
-		n.msg = n.msg + ": " + msg
 	}
 	if len(kv) > 0 {
 		n.ctx = ctxCloneAppend(n.ctx, ctxFromKV(kv...)...)
@@ -280,9 +266,9 @@ func (e *interruptErr) With(key string, val any) Error {
 	return n
 }
 
-func (e *interruptErr) Code(c Code) Error      { return e.clone() } // fixed class
-func (e *interruptErr) WithStack() Error       { return e.clone() } // no stacks for interrupts
-func (e *interruptErr) WithStackSkip(int) Error { return e.clone() }
+func (e *interruptErr) Code(c Code) Error        { return e.clone() } // fixed class
+func (e *interruptErr) WithStack() Error         { return e.clone() } // no stacks for interrupts
+func (e *interruptErr) WithStackSkip(int) Error  { return e.clone() }
 
 func (e *interruptErr) clone() *interruptErr {
 	n := *e
@@ -433,6 +419,8 @@ func InterruptDeadline(reason string) Error {
 // Ctx wraps an existing error with an additional message and key-values.
 // If err already implements xgxerror.Error, it will be augmented immutably.
 // Otherwise it becomes an internal failure with 'err' as cause.
+//
+// Message semantics: same as per-type .Ctx — no concatenation; set once if empty.
 func Ctx(err error, msg string, kv ...any) Error {
 	if err == nil {
 		// Create a generic failure with context only.

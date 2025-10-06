@@ -4,14 +4,29 @@
 //   - Interop & correctness: use runtime.Callers + runtime.CallersFrames for
 //     accurate frame resolution (handles inlining correctly).
 //   - Minimal policy: no global toggles here; callers opt in via WithStack*.
-//   - Pragmatic performance: bounded depth, cheap defaults, no allocations on
-//     success paths (only when capture is requested).
+//   - Pragmatic performance: bounded depth, cheap defaults, allocate only when
+//     capture is requested.
 //
-// References:
-//   - runtime.Callers / CallersFrames docs and example
-//   - Prefer CallersFrames over FuncForPC for inlined frames
-//   - Callers skip semantics (0 = Callers, 1 = its caller)
-//   - Go 1.25 context (no API breaking changes needed here)
+// Skip model (centralized):
+//   - captureStack accounts for its own internal frames:
+//       +1 for runtime.Callers
+//       +1 for captureStack
+//     => baseSkip = 2
+//   - Because we commonly call captureStack via captureStackDefault, we set
+//     baseSkip = 3 to also hide captureStackDefault by default.
+//   - Callers pass ONLY their extra frames to skip (skipExtra).
+//
+// Typical chains:
+//
+//   WithStack → WithStackSkip → captureStackDefault → captureStack → runtime.Callers
+//     • WithStackSkip(0) calls captureStackDefault(1) to skip itself.
+//     • baseSkip (3) ensures we also hide captureStackDefault.
+//
+//   Defect(...) → captureStackDefault(0) → captureStack → runtime.Callers
+//     • baseSkip (3) hides runtime.Callers, captureStack, captureStackDefault.
+//
+// Notes:
+//   - We keep depth modest (defaultMaxDepth) and resolve frames via CallersFrames.
 package xgxerror
 
 import (
@@ -24,54 +39,29 @@ type Frame struct {
 	File     string  // absolute file path (as provided by runtime)
 	Line     int     // line number
 	Function string  // fully-qualified function name (pkg.Func or method)
-	// Note: we intentionally omit "Inlined" because runtime.Frame already
-	// expands inlined frames via CallersFrames; callers rarely need the bit.
 }
 
 // Stack is a slice of Frames from most recent call outward.
 type Stack []Frame
 
 const (
-	// defaultMaxDepth is a conservative bound that captures meaningful
-	// context without excessive work on exceptional paths.
+	// defaultMaxDepth captures meaningful context without excessive work
+	// on exceptional paths.
 	defaultMaxDepth = 64
 )
 
-// captureStackDefault captures a stack skipping 'skip' frames, with a
-// conservative default depth bound.
-//
-// Skip model for a typical call chain:
-//
-//   WithStack → WithStackSkip → captureStackDefault → captureStack → runtime.Callers
-//
-// The skip parameter here is *additional* to the internal helpers. Internally
-// we ensure user-visible stacks begin at (or very near) the user call site by
-// adding +3 in captureStack (to skip runtime.Callers, captureStack, and
-// captureStackDefault). Any extra 'skip' provided by callers is applied on top.
-func captureStackDefault(skip int) Stack {
-	return captureStack(skip, defaultMaxDepth)
-}
-
-// captureStack captures up to maxDepth frames, skipping 'skip' initial frames.
-// It returns a resolved Stack with file, line, and function names.
-//
-// Notes:
-//   - We allocate a small PC buffer sized by maxDepth and let Callers trim it.
-//   - We always reslice to the number of PCs actually written.
-//   - We resolve frames via CallersFrames to handle inlined calls correctly.
-func captureStack(skip, maxDepth int) Stack {
+// captureStack captures a stack. The function accounts for its own internal frames:
+// +1 for runtime.Callers, +1 for captureStack, and +1 for captureStackDefault.
+// Callers pass only their extra skip (skipExtra).
+func captureStack(skipExtra, maxDepth int) Stack {
 	if maxDepth <= 0 {
 		maxDepth = defaultMaxDepth
 	}
-
-	// Skip accounting:
-	//   • +1 for runtime.Callers itself
-	//   • +1 for captureStack
-	//   • +1 for captureStackDefault
-	// Therefore we add +3 to place the first recorded frame at (or very near)
-	// the user-visible call site (e.g., the caller of WithStack/WithStackSkip).
 	pc := make([]uintptr, maxDepth)
-	n := runtime.Callers(skip+3, pc)
+
+	// See header notes: hide runtime.Callers, captureStack, captureStackDefault.
+	const baseSkip = 3
+	n := runtime.Callers(baseSkip+skipExtra, pc)
 	if n == 0 {
 		return nil
 	}
@@ -79,7 +69,6 @@ func captureStack(skip, maxDepth int) Stack {
 
 	frames := runtime.CallersFrames(pc)
 	out := make(Stack, 0, n)
-
 	for {
 		fr, more := frames.Next()
 		out = append(out, Frame{
@@ -93,4 +82,10 @@ func captureStack(skip, maxDepth int) Stack {
 		}
 	}
 	return out
+}
+
+// captureStackDefault captures a stack with a conservative default depth,
+// skipping only the additional frames requested by the caller (skipExtra).
+func captureStackDefault(skipExtra int) Stack {
+	return captureStack(skipExtra, defaultMaxDepth)
 }

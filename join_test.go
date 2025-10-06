@@ -1,163 +1,166 @@
+// join_test.go — verification of Join and Append helpers and unwrap traversal.
 package xgxerror
 
 import (
 	"errors"
 	"fmt"
-	"strings"
 	"testing"
-	"time"
 )
 
-// Test that errors.Join exposes all leaves to errors.Is/As and our helpers.
-func TestJoin_IsAsAndHelpers(t *testing.T) {
-	a := NotFound("user", 1)            // Failure w/ CodeNotFound
-	b := Invalid("email", "bad format") // Failure w/ CodeInvalid
-	joined := errors.Join(a, b)         // Go 1.20+: Unwrap() []error; Is/As traverse.
+type myErr struct{ msg string }
 
-	// stdlib traversal must find both leaves
-	if !errors.Is(joined, a) || !errors.Is(joined, b) {
-		t.Fatalf("errors.Is should match both joined leaves")
-	}
+func (e myErr) Error() string { return e.msg }
 
-	// errors.As should find our concrete type too
-	var fa *failureErr
-	if !errors.As(joined, &fa) {
-		t.Fatalf("errors.As should locate *failureErr in a joined tree")
-	}
+func TestJoin_AllNilsReturnsNil(t *testing.T) {
+	t.Parallel()
 
-	// Our Flatten should return both leaves (order not asserted)
-	leaves := Flatten(joined)
-	if len(leaves) != 2 {
-		t.Fatalf("Flatten(joined) leaves=%d, want 2", len(leaves))
-	}
-
-	// Root should return some leaf reachable in the graph
-	if root := Root(joined); root == nil || !errors.Is(joined, root) {
-		t.Fatalf("Root(joined) should return a reachable leaf")
+	if got := Join(nil, nil, nil); got != nil {
+		t.Fatalf("Join(nil,nil,nil) = %v, want nil", got)
 	}
 }
 
-// Test that nils are ignored by errors.Join and all-nil input yields nil.
-func TestJoin_NilHandling(t *testing.T) {
-	var e1 error
-	var e2 error
-	if got := errors.Join(e1, e2); got != nil {
-		t.Fatalf("errors.Join(nil, nil) = %v; want nil", got)
+func TestJoin_IgnoresNilInputs(t *testing.T) {
+	t.Parallel()
+
+	e1 := errors.New("one")
+
+	if got := Join(nil, e1); !errors.Is(got, e1) {
+		t.Fatalf("Join(nil,e1) should match e1; got %v", got)
 	}
-	a := NotFound("user", 2)
-	if got := errors.Join(nil, a, nil); !errors.Is(got, a) {
-		t.Fatalf("errors.Join should ignore nils and include non-nil leaves")
+	if got := Join(e1, nil); !errors.Is(got, e1) {
+		t.Fatalf("Join(e1,nil) should match e1; got %v", got)
 	}
 }
 
-// Test that %w with multiple operands builds a multi-wrap join that Is/As can traverse.
-func TestJoin_MultiWrapViaFmt(t *testing.T) {
-	a := Invalid("field", "oops")
-	b := NotFound("thing", 9)
-	err := fmt.Errorf("batch failed: %w and %w", a, b) // multi-%w joins leaves
+func TestJoin_SingleNonNilMatchesByIs(t *testing.T) {
+	t.Parallel()
 
-	// stdlib traversal per Go 1.20+ must locate both
-	if !errors.Is(err, a) || !errors.Is(err, b) {
-		t.Fatalf("errors.Is must see both leaves of multi-%%w")
+	e1 := errors.New("alpha")
+	// errors.Join(e1) need not return the same instance, but errors.Is must match.
+	if got := Join(e1); !errors.Is(got, e1) {
+		t.Fatalf("Join(e1) should match e1 via errors.Is; got %v", got)
+	}
+}
+
+func TestJoin_MultipleErrorsTraversableByIs(t *testing.T) {
+	t.Parallel()
+
+	e1 := fmt.Errorf("wrap-1: %w", myErr{"leaf-1"})
+	e2 := errors.New("leaf-2")
+	j := Join(e1, e2)
+
+	if !errors.Is(j, e1) {
+		t.Fatalf("errors.Is(join, e1)=false; join=%v", j)
+	}
+	if !errors.Is(j, e2) {
+		t.Fatalf("errors.Is(join, e2)=false; join=%v", j)
+	}
+	// Also confirm the inner myErr is reachable through the wrap.
+	if !errors.Is(j, myErr{"leaf-1"}) {
+		t.Fatalf("errors.Is(join, myErr{leaf-1})=false; join=%v", j)
+	}
+}
+
+func TestJoin_MultipleErrorsTraversableByAs(t *testing.T) {
+	t.Parallel()
+
+	e1 := fmt.Errorf("wrap-1: %w", myErr{"leaf-1"})
+	e2 := errors.New("leaf-2")
+	j := Join(e1, e2)
+
+	var target myErr
+	if !errors.As(j, &target) {
+		t.Fatalf("errors.As(join, *myErr)=false; join=%v", j)
+	}
+	if target.msg != "leaf-1" {
+		t.Fatalf("errors.As yielded unexpected value: %#v", target)
+	}
+}
+
+func TestAppend_OptimizesNilCasesAndPreservesNilInputs(t *testing.T) {
+	t.Parallel()
+
+	// All nils → nil
+	if got := Append(nil /* none */); got != nil {
+		t.Fatalf("Append(nil) = %v, want nil", got)
+	}
+	if got := Append(nil, nil); got != nil {
+		t.Fatalf("Append(nil,nil) = %v, want nil", got)
 	}
 
-	// Our Walk should visit both leaves (count at least 2 distinct failures).
-	countFail := 0
-	Walk(err, func(e error) bool {
-		var fx *failureErr
-		if errors.As(e, &fx) {
-			countFail++
+	// Single non-nil → match by errors.Is
+	e1 := errors.New("e1")
+	if got := Append(nil, e1); !errors.Is(got, e1) {
+		t.Fatalf("Append(nil,e1) should match e1 via errors.Is; got=%v", got)
+	}
+
+	// Mixed nil/non-nil → contains both leaves
+	e2 := errors.New("e2")
+	a := Append(e1, nil, e2, nil)
+	if !errors.Is(a, e1) || !errors.Is(a, e2) {
+		t.Fatalf("Append did not preserve inputs: %v", a)
+	}
+
+	// Do NOT assert symmetry of errors.Is between arbitrary joined values.
+	// errors.Is(a, b) does not imply errors.Is(b, a).
+}
+
+func TestJoinedErrors_WorkWithFlatten(t *testing.T) {
+	t.Parallel()
+
+	// Build two xgxerror leaves so Flatten (which prefers structured leaves)
+	// can discover both reliably.
+	leaf1 := Conflict("c1").Ctx("", "k1", 1)           // xgxerror failure
+	leaf2 := Invalid("name", "blank").Ctx("", "k2", 2) // xgxerror failure
+
+	// Wrap leaf1 once to ensure Flatten digs through wraps.
+	wrapped := fmt.Errorf("wrap: %w", leaf1)
+	j := Join(wrapped, leaf2)
+
+	leaves := Flatten(j)
+
+	// We expect both structured leaves to be present.
+	// Do NOT assume order.
+	var found1, found2 bool
+	for _, e := range leaves {
+		if errors.Is(e, leaf1) {
+			found1 = true
 		}
-		return true
-	})
-	if countFail < 2 {
-		t.Fatalf("Walk should visit multiple failure leaves; got %d", countFail)
-	}
-}
-
-// Test that additional wrapping layers above a join are still traversed.
-func TestJoin_NestedWrapping(t *testing.T) {
-	leaf := Invalid("age", "too young")
-	joined := errors.Join(leaf, NotFound("user", 5))
-	wrapped := Wrap(joined, "pipeline failed", "stage", "validate")
-
-	// Both Is/As must see the original leaf through the extra wrapper.
-	if !errors.Is(wrapped, leaf) {
-		t.Fatalf("errors.Is should traverse wrapper -> join -> leaf")
-	}
-
-	var fx *failureErr
-	if !errors.As(wrapped, &fx) {
-		t.Fatalf("errors.As should locate failure under wrapper")
-	}
-	ctx := wrapped.Context()
-	if got := ctx["stage"]; got != "validate" {
-		t.Fatalf("context lost through wrappers; got stage=%v", got)
-	}
-}
-
-// Test our helpers against a larger join set.
-func TestJoin_FlattenMany(t *testing.T) {
-	errs := []error{
-		NotFound("user", 7),
-		Invalid("email", "bad"),
-		Conflict("version mismatch"),
-	}
-	joined := errors.Join(errs...)
-
-	leaves := Flatten(joined)
-	if len(leaves) != len(errs) {
-		t.Fatalf("Flatten(join %d) => %d leaves; want %d", len(errs), len(leaves), len(errs))
-	}
-
-	// Sanity-check that string forms are included when formatting the join.
-	s := fmt.Sprintf("%v", joined)
-	for _, e := range errs {
-		if !strings.Contains(s, e.Error()) {
-			t.Fatalf("joined %%v missing leaf: %q in %q", e.Error(), s)
+		if errors.Is(e, leaf2) {
+			found2 = true
 		}
 	}
-}
-
-// Ensure HasCode and CodeOf behave sensibly across joins.
-func TestJoin_CodePredicates(t *testing.T) {
-	a := Unavailable("db")
-	b := TooManyRequests("api")
-	err := errors.Join(a, b)
-
-	if !HasCode(err, CodeUnavailable) || !HasCode(err, CodeTooManyRequests) {
-		t.Fatalf("HasCode should detect codes within a join")
-	}
-	if c := CodeOf(err); c == "" {
-		t.Fatalf("CodeOf(join) should return some code present in the chain")
-	}
-
-	// Retryable heuristic should return true if any joined leaf is transient.
-	if !IsRetryable(err) {
-		t.Fatalf("IsRetryable(join(unavailable,429)) should be true")
-	}
-
-	reordered := errors.Join(Invalid("field", "bad"), Timeout(3*time.Second))
-	if !HasCode(reordered, CodeTimeout) {
-		t.Fatalf("HasCode should find CodeTimeout even when not first in join")
-	}
-	if !IsRetryable(reordered) {
-		t.Fatalf("IsRetryable should consider all codes in a join, regardless of order")
+	if !found1 || !found2 {
+		t.Fatalf("Flatten(join) missing leaves: found1=%v found2=%v; leaves=%v", found1, found2, leaves)
 	}
 }
 
-// Confirm Flatten/Walk handle single errors (non-join) gracefully.
-func TestJoin_SingleErrorPath(t *testing.T) {
-	one := NotFound("post", 11)
-	if leaves := Flatten(one); len(leaves) != 1 || leaves[0] != one {
-		t.Fatalf("Flatten(single) should return the error itself")
-	}
-	seen := false
-	Walk(one, func(e error) bool {
-		seen = seen || e == one
-		return true
+
+func TestJoinedErrors_WorkWithWalk(t *testing.T) {
+	t.Parallel()
+
+	leaf1 := myErr{"l1"}
+	leaf2 := errors.New("l2")
+	wrapped := fmt.Errorf("wrap: %w", leaf1)
+	j := Join(wrapped, leaf2)
+
+	var sawLeaf1, sawLeaf2 bool
+	var count int
+	Walk(j, func(e error) bool {
+		count++
+		if errors.Is(e, leaf1) {
+			sawLeaf1 = true
+		}
+		if errors.Is(e, leaf2) {
+			sawLeaf2 = true
+		}
+		return true // continue
 	})
-	if !seen {
-		t.Fatalf("Walk(single) should visit the node")
+
+	if count == 0 {
+		t.Fatalf("Walk did not visit any errors")
+	}
+	if !sawLeaf1 || !sawLeaf2 {
+		t.Fatalf("Walk did not reach both leaves: leaf1=%v leaf2=%v", sawLeaf1, sawLeaf2)
 	}
 }

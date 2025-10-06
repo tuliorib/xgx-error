@@ -7,15 +7,15 @@
 //
 // Rationale:
 //   • Go map iteration order is unspecified; slice preserves insertion order.
-//   • Slice append may re-use capacity; we always allocate a fresh slice when
-//     “mutating” to ensure copy-on-write semantics for safety.
+//   • Slice append may re-use capacity; we avoid aliasing by allocating when
+//     we actually append. No-op paths avoid extra allocations.
 //
 // Note: All identifiers here are unexported except Field; other files in the
 // same package use these helpers to implement Error methods.
 package xgxerror
 
 // Field represents a single contextual key-value pair attached to an error.
-// Keys SHOULD be snake_case for consistency, but the core does not enforce it.
+// Keys SHOULD be snake_case for consistency; the core does not enforce policy.
 type Field struct {
 	Key string
 	Val any
@@ -28,8 +28,14 @@ type fields []Field
 // emptyFields is a canonical empty context.
 var emptyFields = make(fields, 0)
 
-// ctxCloneAppend returns a NEW slice with dst's contents followed by add.
-// It always allocates a fresh backing array to avoid aliasing via append.
+// ctxCloneAppend returns a slice with dst's contents followed by add.
+//
+// Rules:
+//   • If add is empty:
+//       - If dst is empty → return emptyFields.
+//       - If dst is non-empty → return dst as-is (no allocation, no copy).
+//         This is safe because callers MUST NOT mutate returned slices.
+//   • If add is non-empty: allocate a fresh backing array to avoid aliasing.
 func ctxCloneAppend(dst fields, add ...Field) fields {
 	n := len(dst)
 	m := len(add)
@@ -37,11 +43,9 @@ func ctxCloneAppend(dst fields, add ...Field) fields {
 		if n == 0 {
 			return emptyFields
 		}
-		// Return a deep copy to keep immutability guarantees for callers that
-		// might retain references (rare, but cheap to ensure).
-		out := make(fields, n)
-		copy(out, dst)
-		return out
+		// v1.1 micro-alloc optimization: return dst directly for no-op appends.
+		// Immutability is preserved by contract (callers never mutate).
+		return dst
 	}
 	out := make(fields, n+m)
 	copy(out, dst)
@@ -61,8 +65,6 @@ func ctxCloneAppend(dst fields, add ...Field) fields {
 // Example (why we drop the whole pair):
 //   // INPUT (bad first key):
 //   ctxFromKV(123, "v1", "k2", "v2")
-//   // OLD behavior (misaligned):
-//   //   → [{Key:"v1", Val:"k2"}, {Key:"v2", Val:nil}]
 //   // NEW behavior (pair dropped, keeps alignment):
 //   //   → [{Key:"k2", Val:"v2"}]
 func ctxFromKV(kv ...any) fields {
@@ -95,19 +97,20 @@ func ctxFromKV(kv ...any) fields {
 	if len(out) == 0 {
 		return emptyFields
 	}
-	// Return a fresh slice with exact length (already exact via append).
 	return out
 }
 
 // ctxToMap creates a NEW map from fields (copy-on-read).
-// Later duplicate keys overwrite earlier ones (last-write-wins).
+// Semantics:
+//   • Always returns a non-nil map (safe for mutation by the caller).
+//   • Later duplicate keys overwrite earlier ones (last-write-wins).
+//   • Empty keys are filtered out to avoid polluting caller maps.
 func ctxToMap(fs fields) map[string]any {
-	if len(fs) == 0 {
-		return nil
-	}
 	m := make(map[string]any, len(fs))
 	for _, f := range fs {
-		// Empty keys are allowed but discouraged; core does not enforce policy.
+		if f.Key == "" {
+			continue // filter empty keys
+		}
 		m[f.Key] = f.Val
 	}
 	return m

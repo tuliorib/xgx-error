@@ -6,53 +6,116 @@
 //     classic wrapping (Unwrap() error).
 //   - No policy, no logging — just correct, minimal utilities.
 //
-// Notes:
-//   - Go defines two Unwrap forms: Unwrap() error and Unwrap() []error.
-//     errors.Is / errors.As already traverse both; these helpers expose a
-//     programmatic traversal (e.g., for collecting leaves).
-//   - We avoid allocations on fast paths and guard against pathological depth.
+// Design notes (Go ≥1.20):
+//   - errors.Join returns an error with Unwrap() []error; errors.Unwrap only calls
+//     Unwrap() error, so correct traversal must handle BOTH forms.
+//   - We must NOT use map[error] as a blanket “seen” set: interface values whose
+//     dynamic type is not comparable will panic as map keys. We use a dual guard:
+//       • seenErr  (map[error]struct{})        — only for comparable dynamic types
+//       • seenPtr  (map[uintptr]struct{})      — pointer identity for pointer types
+//     Non-comparable, non-pointer dynamics are treated as acyclic (and bounded by depth).
+//
+// Traversal semantics:
+//   - Walk:        pre-order (visit, then expand children). Stops early if fn returns false.
+//   - Flatten:     collects LEAVES only (nodes with no children) in DFS order.
+//   - Root:        first DFS leaf (deepest along the first path), nil-safe.
+//   - Has:         nil-safe wrapper over errors.Is.
+//
+// Performance:
+//   - Reflection is used minimally to decide comparability/pointer identity; this is not
+//     on a hot path (error handling), and we add fast-paths for package-local pointer types.
 package xgxerror
 
 import (
 	"errors"
+	"reflect"
 )
 
-// singleUnwrapper matches errors that wrap a single cause.
-type singleUnwrapper interface {
-	Unwrap() error
+// single/multi unwrap interfaces (stdlib-compatible)
+type singleUnwrapper interface{ Unwrap() error }
+type multiUnwrapper interface{ Unwrap() []error }
+
+// ---------- small helpers ----------------------------------------------------
+
+// fastIsPointer returns true if err's dynamic type is a pointer.
+// Fast path for xgxerror concrete types; fallback to reflect for others.
+func fastIsPointer(err error) bool {
+	if err == nil {
+		return false
+	}
+	switch err.(type) {
+	case *failureErr, *defectErr, *interruptErr:
+		return true
+	}
+	return reflect.ValueOf(err).Kind() == reflect.Ptr
 }
 
-// multiUnwrapper matches errors that wrap multiple causes (e.g., errors.Join).
-type multiUnwrapper interface {
-	Unwrap() []error
+// isComparable reports whether err's dynamic type is comparable (safe as a map key).
+func isComparable(err error) bool {
+	if err == nil {
+		return false
+	}
+	return reflect.TypeOf(err).Comparable()
 }
 
-// Flatten walks an error tree and returns a slice of leaf errors in depth-first
-// order (nodes with no children). For joined errors (Unwrap() []error), all
-// branches are explored.
-// nil yields nil.
-//
-// Guarantees:
-//   - The returned slice contains only non-nil errors.
-//   - Duplicates may appear if the same leaf is reachable via multiple paths.
-//     (Cycle protection prevents infinite loops.)
+// ptrID returns a pointer identity for pointer-typed dynamic errors.
+func ptrID(err error) (uintptr, bool) {
+	if err == nil {
+		return 0, false
+	}
+	rv := reflect.ValueOf(err)
+	if rv.Kind() == reflect.Ptr && !rv.IsNil() {
+		return rv.Pointer(), true
+	}
+	return 0, false
+}
+
+// markSeen returns true if 'err' was newly marked; false if already seen.
+// Uses seenErr for comparable dynamics, seenPtr for pointer-typed non-comparable.
+// If err is neither comparable nor pointer, it returns true (treated as acyclic).
+func markSeen(err error, seenErr map[error]struct{}, seenPtr map[uintptr]struct{}) bool {
+	if err == nil {
+		return false
+	}
+	if isComparable(err) {
+		if _, ok := seenErr[err]; ok {
+			return false
+		}
+		seenErr[err] = struct{}{}
+		return true
+	}
+	if fastIsPointer(err) {
+		if id, ok := ptrID(err); ok {
+			if _, dup := seenPtr[id]; dup {
+				return false
+			}
+			seenPtr[id] = struct{}{}
+			return true
+		}
+	}
+	// Non-comparable & non-pointer: allow; bounded by depth cap.
+	return true
+}
+
+// ---------- API: Flatten / Walk / Root / Has ---------------------------------
+
+// Flatten walks an error graph and returns leaf errors (nodes with no children)
+// in depth-first order. It fully explores both single- and multi-unwrap paths.
+// If err is nil, it returns nil.
 func Flatten(err error) []error {
 	if err == nil {
 		return nil
 	}
 
-	// Fast path: if it neither unwraps single nor multi, it's already a leaf.
-	switch e := err.(type) {
-	case multiUnwrapper:
-		// continue below
-		_ = e
-	case singleUnwrapper:
-		// continue below
+	// Fast path: not a wrapper at all → single leaf.
+	switch err.(type) {
+	case multiUnwrapper, singleUnwrapper:
 	default:
 		return []error{err}
 	}
 
-	const maxDepth = 1 << 12 // generous safety cap to avoid runaway graphs
+	const maxDepth = 1 << 12 // generous cap against runaway graphs
+
 	type frame struct {
 		e   error
 		idx int // next child index to visit (for multi)
@@ -60,44 +123,45 @@ func Flatten(err error) []error {
 
 	out := make([]error, 0, 4)
 	stack := make([]frame, 0, 8)
-	seen := make(map[error]struct{}, 16)
+	seenErr := make(map[error]struct{}, 16)
+	seenPtr := make(map[uintptr]struct{}, 16)
 
-	// push root
+	// Seed root
 	stack = append(stack, frame{e: err})
+	_ = markSeen(err, seenErr, seenPtr)
 
 	for len(stack) > 0 && len(stack) < maxDepth {
 		top := &stack[len(stack)-1]
 
-		// If we've seen this error before, pop and continue (cycle guard).
-		if _, ok := seen[top.e]; ok {
-			stack = stack[:len(stack)-1]
-			continue
-		}
-		seen[top.e] = struct{}{}
-
-		// Try multi-unwrapping first.
+		// Explore multi first; keep node until all children are processed.
 		if m, ok := top.e.(multiUnwrapper); ok {
 			children := m.Unwrap()
-			// Skip nils (per spec, implementations shouldn't include nil).
+			// Skip nils defensively (should not appear).
 			for top.idx < len(children) && children[top.idx] == nil {
 				top.idx++
 			}
 			if top.idx < len(children) {
-				// DFS: push next child.
-				stack = append(stack, frame{e: children[top.idx]})
+				child := children[top.idx]
 				top.idx++
+				if markSeen(child, seenErr, seenPtr) {
+					stack = append(stack, frame{e: child})
+				}
 				continue
 			}
-			// No more children → pop.
+			// Done with all children → pop parent.
 			stack = stack[:len(stack)-1]
 			continue
 		}
 
-		// Then try single-unwrapping.
+		// Then single-unwrap; descend IN-PLACE so parents aren't misclassified as leaves.
 		if s, ok := top.e.(singleUnwrapper); ok {
 			if u := s.Unwrap(); u != nil {
-				// Descend to single child.
-				stack = append(stack, frame{e: u})
+				if markSeen(u, seenErr, seenPtr) {
+					top.e = u // descend without pushing; continue exploring
+					continue
+				}
+				// Child already seen: pop parent without recording it as a leaf.
+				stack = stack[:len(stack)-1]
 				continue
 			}
 		}
@@ -110,64 +174,59 @@ func Flatten(err error) []error {
 	return out
 }
 
-// Walk traverses an error graph depth-first and calls visit for each distinct
-// error encountered in pre-order (all nodes, not just leaves). If visit returns
-// false, traversal stops early.
-// nil is a no-op.
-//
-// Walk is useful for custom searches without allocating a slice like Flatten.
+// Walk traverses an error graph depth-first and calls visit for each DISTINCT
+// node in PRE-ORDER (visit BEFORE expanding children). If visit returns false,
+// traversal stops early. It is safe on cycles and nil is a no-op.
+// Walk visits each distinct node in pre-order (visit before children).
 func Walk(err error, visit func(error) bool) {
-	if err == nil || visit == nil {
-		return
-	}
-	const maxDepth = 1 << 12
-	type frame struct {
-		e   error
-		idx int
-	}
+    if err == nil || visit == nil {
+        return
+    }
+    const maxDepth = 1 << 12
+    type frame struct{ e error }
 
-	stack := make([]frame, 0, 8)
-	seen := make(map[error]struct{}, 16)
-	stack = append(stack, frame{e: err})
+    stack := make([]frame, 0, 8)
+    seenErr := make(map[error]struct{}, 16)     // only for comparable dynamics
+    seenPtr := make(map[uintptr]struct{}, 16)   // pointer identity for non-comparable pointers
 
-	for len(stack) > 0 && len(stack) < maxDepth {
-		top := &stack[len(stack)-1]
-		if _, ok := seen[top.e]; ok {
-			stack = stack[:len(stack)-1]
-			continue
-		}
-		seen[top.e] = struct{}{}
+    stack = append(stack, frame{e: err})
+    _ = markSeen(err, seenErr, seenPtr)
 
-		if !visit(top.e) {
-			return
-		}
+    for len(stack) > 0 && len(stack) < maxDepth {
+        // POP first → guarantees we will not re-visit parent.
+        cur := stack[len(stack)-1].e
+        stack = stack[:len(stack)-1]
 
-		// Expand children (multi first, then single) to mirror Flatten.
-		if m, ok := top.e.(multiUnwrapper); ok {
-			children := m.Unwrap()
-			// push in reverse so DFS visits children left-to-right in natural order
-			for i := len(children) - 1; i >= 0; i-- {
-				if c := children[i]; c != nil {
-					stack = append(stack, frame{e: c})
-				}
-			}
-			continue
-		}
-		if s, ok := top.e.(singleUnwrapper); ok {
-			if u := s.Unwrap(); u != nil {
-				stack = append(stack, frame{e: u})
-				continue
-			}
-		}
-		// Leaf → pop
-		stack = stack[:len(stack)-1]
-	}
+        // Pre-order visit.
+        if !visit(cur) {
+            return
+        }
+
+        // Expand children (multi first; push in reverse for L→R DFS).
+        if m, ok := cur.(multiUnwrapper); ok {
+            kids := m.Unwrap()
+            for i := len(kids) - 1; i >= 0; i-- {
+                c := kids[i]
+                if c == nil { continue }
+                if markSeen(c, seenErr, seenPtr) {
+                    stack = append(stack, frame{e: c})
+                }
+            }
+            continue
+        }
+        if s, ok := cur.(singleUnwrapper); ok {
+            if u := s.Unwrap(); u != nil && markSeen(u, seenErr, seenPtr) {
+                stack = append(stack, frame{e: u})
+            }
+            continue
+        }
+        // Leaf: nothing to push
+    }
 }
 
-// Root returns an arbitrary leaf (deepest along the first-found path). For
-// classic singly-wrapped chains, this is the ultimate cause. For joined errors,
-// the return value is the first leaf discovered by DFS. If err is nil, Root
-// returns nil.
+
+// Root returns the first DFS leaf (deepest along the first path).
+// If err is nil, Root returns nil.
 func Root(err error) error {
 	leaves := Flatten(err)
 	if len(leaves) == 0 {
@@ -176,8 +235,8 @@ func Root(err error) error {
 	return leaves[0]
 }
 
-// Has reports whether target is found anywhere in err's unwrap graph.
-// It is a convenience thin wrapper over errors.Is that also treats nil safely.
+// Has reports whether target appears anywhere in err's unwrap graph.
+// It wraps errors.Is with nil-safety.
 func Has(err, target error) bool {
 	if err == nil || target == nil {
 		return false
